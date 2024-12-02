@@ -1,0 +1,65 @@
+stages:
+  - audit
+  - cleanup
+
+variables:
+  GITLAB_URL: $GITLAB_URL
+  ACCESS_TOKEN: $ACCESS_TOKEN
+  PYTHONUNBUFFERED: 1  # 确保Python输出不会被缓冲
+
+before_script:
+  - pip3 install --upgrade pip
+  - pip3 install aiohttp panda
+  
+code_changes:
+  stage: audit
+  script:
+    - python3 code_logs.py
+  artifacts:
+    paths:
+      - code_changes.csv
+      - audit_records.csv
+      - cicd_pipelines.csv
+      - cicd_changes.csv
+    expire_in: 1 week
+  only:
+    - schedules  # 仅定时任务触发
+    - web       # 允许手动Web界面触发
+  when: manual  # 手动触发
+  tags:
+    - local-runner
+
+audit_changes:
+  stage: audit
+  script:
+    - python3 audit_logs.py
+  artifacts:
+    paths:
+      - audit_log.csv
+      - system_config_changes.csv
+    expire_in: 1 week
+  only:
+    - schedules
+    - web
+  when: manual
+  tags:
+    - local-runner
+
+cleanup:
+  stage: cleanup
+  script:
+    - rm -f code_changes.csv
+    - rm -f audit_records.csv
+    - rm -f cicd_pipelines.csv
+    - rm -f cicd_changes.csv
+    - rm -f audit_log.csv
+    - rm -f system_config_changes.csv
+  dependencies:
+    - code_changes
+    - audit_changes
+  only:
+    - schedules
+    - web
+  when: manual
+  tags:
+    - local-runner
