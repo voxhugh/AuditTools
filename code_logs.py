@@ -40,25 +40,37 @@ async def make_api_request(session, url, headers=None):
         logging.error(f"请求失败: {e}")
         return []
 
+def time_filters(url, since_param='updated_after', until_param='updated_before', order_by=None):
+    """ 时间过滤 """
+    query_params = []
+    if SINCE:
+        query_params.append(f"{since_param}={SINCE}")
+    if UNTIL:
+        query_params.append(f"{until_param}={UNTIL}")
+    if order_by:
+        query_params.append(f"order_by={order_by}")
+
+    if query_params:
+        separator = '&' if '?' in url else '?'
+        return f"{url}{separator}{'&'.join(query_params)}"
+    return url
+
 async def get_project_ids(session):
     """
-    获取所有项目的ID，并根据时间段筛选
+    获取所有项目的ID，并根据时间段筛选（通过API请求参数实现）
     """
     project_ids = []
     page = 1
     while True:
-        projects_url = f"{GITLAB_URL}/projects?page={page}&per_page={PER_PAGE}"
+        projects_url = time_filters(f"{GITLAB_URL}/projects?page={page}&per_page={PER_PAGE}",order_by='id')
         projects = await make_api_request(session, projects_url, HEADERS)
+        
         if not projects:
             break
-        for project in projects:
-            last_activity_at = project.get("last_activity_at")
-            if SINCE and (not last_activity_at or datetime.fromisoformat(last_activity_at.replace("Z", "+00:00")) < datetime.fromisoformat(SINCE)):
-                continue
-            if UNTIL and (not last_activity_at or datetime.fromisoformat(last_activity_at.replace("Z", "+00:00")) > datetime.fromisoformat(UNTIL)):
-                continue
-            project_ids.append(project["id"])
+        
+        project_ids.extend([project["id"] for project in projects])
         page += 1
+    
     return project_ids
 
 async def get_project_name(session, project_id):
@@ -87,17 +99,6 @@ def compare_yml_files(old_content, new_content):
         change_type = "deleted"
     return change_type, ''.join(diff)
 
-def time_filters(url):
-    """ 时间过滤 """
-    query_params = []
-    if SINCE:
-        query_params.append(f"since={SINCE}")
-    if UNTIL:
-        query_params.append(f"until={UNTIL}")
-    
-    if query_params:
-        url += "?" + "&".join(query_params)
-
 async def get_code_changes(session, project_id):
     """
     获取指定项目ID的代码变更记录
@@ -107,7 +108,7 @@ async def get_code_changes(session, project_id):
     
     # 获取提交记录
     commits_url = f"{GITLAB_URL}/projects/{project_id}/repository/commits"
-    time_filters(commits_url)
+    commits_url = time_filters(commits_url, since_param='since', until_param='until')
     commits = await make_api_request(session, commits_url, HEADERS)
     for commit in commits:
         commit_record = {
@@ -123,8 +124,7 @@ async def get_code_changes(session, project_id):
         all_code_changes.append(commit_record)
 
     # 获取合并请求记录
-    merge_requests_url = f"{GITLAB_URL}/projects/{project_id}/merge_requests"
-    time_filters(merge_requests_url)
+    merge_requests_url = time_filters(f"{GITLAB_URL}/projects/{project_id}/merge_requests")
     merge_requests = await make_api_request(session, merge_requests_url, HEADERS)
     for merge_request in merge_requests:
         state = merge_request["state"]
@@ -142,8 +142,7 @@ async def get_code_changes(session, project_id):
         all_code_changes.append(merge_record)
 
     # 获取拉取记录
-    pulls_url = f"{GITLAB_URL}/projects/{project_id}/events?action=pulled"
-    time_filters(pulls_url)
+    pulls_url = time_filters(f"{GITLAB_URL}/projects/{project_id}/events?action=pulled")
     events = await make_api_request(session, pulls_url, HEADERS)
     for event in events:
         author = event.get("author", {})
@@ -183,8 +182,7 @@ async def get_audit_records(session, project_id):
     project_name = await get_project_name(session, project_id)
     
         # 获取所有MR
-    merge_requests_url = f"{GITLAB_URL}/projects/{project_id}/merge_requests"
-    time_filters(merge_requests_url)
+    merge_requests_url = time_filters(f"{GITLAB_URL}/projects/{project_id}/merge_requests")
     merge_requests = await make_api_request(session, merge_requests_url, HEADERS)
     
     for merge_request in merge_requests:
@@ -236,8 +234,7 @@ async def get_cicd_pipelines(session, project_id):
     """
     获取指定项目ID的CI/CD管道记录
     """
-    pipelines_url = f"{GITLAB_URL}/projects/{project_id}/pipelines"
-    time_filters(pipelines_url)
+    pipelines_url = time_filters(f"{GITLAB_URL}/projects/{project_id}/pipelines")
     pipelines = await make_api_request(session, pipelines_url, HEADERS)
     all_pipeline_records = []
     for pipeline in pipelines:
@@ -290,7 +287,7 @@ async def track_cicd_config_changes(session, project_id):
     """ 跟踪指定项目中的CI/CD配置变更 """
     project_name = await get_project_name(session, project_id)
     commits_url = f"{GITLAB_URL}/projects/{project_id}/repository/commits"
-    time_filters(commits_url)
+    commits_url = time_filters(commits_url, since_param='since', until_param='until')
     commits = await make_api_request(session, commits_url, HEADERS)
     all_changes = []
     for commit in commits:

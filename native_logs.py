@@ -1,6 +1,6 @@
 import json
 import csv
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -56,14 +56,33 @@ output_csvs = {
     'features_json': 'features_json_logs.csv'
 }
 
-# 预留时间点，默认None表示提取所有日志
-start_time = None  # 示例：datetime(2023, 1, 1, 0, 0, 0)
+# 开始时间，例如：datetime.fromisoformat("2024-12-04T00:02:00Z")
+START_TIME = None
 
 # 用于存储提取的数据
 data = {category: [] for category in fields}
 
+from datetime import datetime, timezone
+
+# 标准化时间处理
+def parse_iso8601_time(time_str):
+    if not time_str:
+        return None
+    try:
+        # 处理带Z的ISO 8601格式时间字符串
+        if time_str.endswith('Z'):
+            time_str = time_str[:-1] + '+00:00'
+        
+        dt = datetime.fromisoformat(time_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        # print(f"Warning: Invalid time format: {time_str}")
+        return None
+
 # 解析日志文件
-def parse_log_file(file_path, category, start_time=None):
+def parse_log_file(file_path, category):
     if not Path(file_path).exists():
         print(f"文件 {file_path} 不存在，跳过处理。")
         return
@@ -72,45 +91,45 @@ def parse_log_file(file_path, category, start_time=None):
         for line in file:
             try:
                 log_entry = json.loads(line)
-                if start_time is not None:
-                    log_time = datetime.fromisoformat(log_entry.get('time', ''))
-                    if log_time < start_time:
+                if START_TIME:
+                    log_time = parse_iso8601_time(log_entry.get('time', ''))
+                    if log_time is None or log_time < START_TIME:
                         continue
                 entry = {field: log_entry.get(field, '') for field in fields[category]}
                 entry['category'] = category
-                entry['time'] = log_entry.get('time', '')
-                data[category].append(entry)
+                yield entry  # 使用生成器逐行返回数据以节省内存
             except json.JSONDecodeError:
                 continue
 
 # 将数据保存到CSV文件
-def save_to_csv(data, output_csv, category):
-    fieldnames = ['category', 'time'] + fields[category]
+def save_to_csv(data_generator, output_csv, category):
+    fieldnames = ['category'] + fields[category]
     file_exists = Path(output_csv).exists()
 
     with open(output_csv, 'a', newline='', encoding='utf-8') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         if not file_exists:
             writer.writeheader()
-        writer.writerows(data)
+        for entry in data_generator:
+            writer.writerow(entry)
 
 # 多线程处理日志文件
-def process_log_files(log_files, start_time=None):
+def process_log_files(log_files):
     with ThreadPoolExecutor() as executor:
-        futures = [executor.submit(parse_log_file, file_path, category, start_time) for category, file_path in log_files.items()]
+        # 提交任务时同时传递 category 和 file_path
+        futures = {executor.submit(parse_log_file, file_path, category): category for category, file_path in log_files.items()}
         for future in futures:
             try:
-                future.result()
-            except FileNotFoundError as e:
-                print(e)
+                category = futures[future]
+                data_gen = future.result()
+                save_to_csv(data_gen, output_csvs[category], category)
+            except Exception as e:  # 更广泛的异常捕获以确保所有异常都能被捕获
+                print(f"Error processing file for category {futures[future]}: {e}")
 
 # 主函数
 def main():
-    process_log_files(log_files, start_time)
-    for category, entries in data.items():
-        if entries:
-            save_to_csv(entries, output_csvs[category], category)
+    process_log_files(log_files)
+    print("日志数据已提取并保存到相应文件")
 
 if __name__ == "__main__":
     main()
-    print("日志数据已提取并保存到相应文件")

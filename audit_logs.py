@@ -36,23 +36,27 @@ async def make_api_request(session, url):
         logging.error(f"请求失败: {e}")
         return []
 
-def time_filters(url):
+def time_filters(url, order_by=None):
     """ 时间过滤 """
     query_params = []
     if START_TIME:
         query_params.append(f"created_after={START_TIME.isoformat()}")
     if END_TIME:
         query_params.append(f"created_before={END_TIME.isoformat()}")
+    if order_by:
+        query_params.append(f"order_by={order_by}")
+        
     if query_params:
-        url += "?" + "&".join(query_params)
+        separator = '&' if '?' in url else '?'
+        return f"{url}{separator}{'&'.join(query_params)}"
+    return url
 
 async def get_audit_events(session):
     """获取审计事件"""
     events = []
     page = 1
     while True:
-        audit_url = f"{GITLAB_URL}/audit_events?page={page}&per_page={PER_PAGE}"
-        time_filters(audit_url)
+        time_filters(f"{GITLAB_URL}/audit_events?page={page}&per_page={PER_PAGE}")
         batch = await make_api_request(session, audit_url)
         if not batch:
             break
@@ -73,21 +77,22 @@ def parse_event(event):
     }
 
 async def get_projects(session):
-    """获取所有项目，并根据last_activity_at过滤"""
-    projects = []
+    """
+    获取所有项目的ID，并根据时间段筛选（通过API请求参数实现）
+    """
+    project_ids = []
     page = 1
     while True:
-        projects_url = f"{GITLAB_URL}/projects?page={page}&per_page={PER_PAGE}"
-        time_filters(projects_url)
-        batch = await make_api_request(session, projects_url)
-        if not batch:
+        projects_url = time_filters(f"{GITLAB_URL}/projects?page={page}&per_page={PER_PAGE}",order_by='id')
+        projects = await make_api_request(session, projects_url, HEADERS)
+        
+        if not projects:
             break
-        for project in batch:
-            last_activity_at = datetime.fromisoformat(project["last_activity_at"])
-            if (not START_TIME or last_activity_at >= START_TIME) and (not END_TIME or last_activity_at <= END_TIME):
-                projects.append(project)
+        
+        project_ids.extend([project["id"] for project in projects])
         page += 1
-    return projects
+    
+    return project_ids
 
 async def get_webhooks(session, project_id):
     """获取项目的Webhooks"""
