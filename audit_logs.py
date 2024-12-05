@@ -36,16 +36,14 @@ async def make_api_request(session, url):
         logging.error(f"请求失败: {e}")
         return []
 
-def time_filters(url, order_by=None):
+def time_filters(url, since_param='updated_after', until_param='updated_before'):
     """ 时间过滤 """
     query_params = []
-    if START_TIME:
-        query_params.append(f"created_after={START_TIME.isoformat()}")
-    if END_TIME:
-        query_params.append(f"created_before={END_TIME.isoformat()}")
-    if order_by:
-        query_params.append(f"order_by={order_by}")
-        
+    if SINCE:
+        query_params.append(f"{since_param}={SINCE}")
+    if UNTIL:
+        query_params.append(f"{until_param}={UNTIL}")
+
     if query_params:
         separator = '&' if '?' in url else '?'
         return f"{url}{separator}{'&'.join(query_params)}"
@@ -56,7 +54,7 @@ async def get_audit_events(session):
     events = []
     page = 1
     while True:
-        time_filters(f"{GITLAB_URL}/audit_events?page={page}&per_page={PER_PAGE}")
+        audit_url = time_filters(f"{GITLAB_URL}/audit_events?page={page}&per_page={PER_PAGE}")
         batch = await make_api_request(session, audit_url)
         if not batch:
             break
@@ -78,12 +76,12 @@ def parse_event(event):
 
 async def get_projects(session):
     """
-    获取所有项目的ID，并根据时间段筛选（通过API请求参数实现）
+    获取所有项目的ID，并根据时间段筛选
     """
     project_ids = []
     page = 1
     while True:
-        projects_url = time_filters(f"{GITLAB_URL}/projects?page={page}&per_page={PER_PAGE}",order_by='id')
+        projects_url = time_filters(f"{GITLAB_URL}/projects?page={page}&per_page={PER_PAGE}&order_by=updated_at")
         projects = await make_api_request(session, projects_url, HEADERS)
         
         if not projects:
@@ -132,7 +130,7 @@ def parse_access_token(token):
     }
 
 async def get_system_config_changes(session):
-    # 获取所有项目，并根据last_activity_at过滤
+    # 获取所有项目
     projects = await get_projects(session)
     changes = []
     for project in projects:

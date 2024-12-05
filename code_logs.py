@@ -25,7 +25,7 @@ if not ACCESS_TOKEN:
 # 常量
 HEADERS = {"PRIVATE-TOKEN": ACCESS_TOKEN}
 PER_PAGE = 100
-SINCE = None  # 开始时间
+SINCE = None  # 开始时间（例如："2024-11-27T00:00:00Z"）
 UNTIL = None  # 结束时间
 
 async def make_api_request(session, url, headers=None):
@@ -40,15 +40,13 @@ async def make_api_request(session, url, headers=None):
         logging.error(f"请求失败: {e}")
         return []
 
-def time_filters(url, since_param='updated_after', until_param='updated_before', order_by=None):
+def time_filters(url, since_param='updated_after', until_param='updated_before'):
     """ 时间过滤 """
     query_params = []
     if SINCE:
         query_params.append(f"{since_param}={SINCE}")
     if UNTIL:
         query_params.append(f"{until_param}={UNTIL}")
-    if order_by:
-        query_params.append(f"order_by={order_by}")
 
     if query_params:
         separator = '&' if '?' in url else '?'
@@ -57,12 +55,12 @@ def time_filters(url, since_param='updated_after', until_param='updated_before',
 
 async def get_project_ids(session):
     """
-    获取所有项目的ID，并根据时间段筛选（通过API请求参数实现）
+    获取所有项目的ID，并根据时间段筛选
     """
     project_ids = []
     page = 1
     while True:
-        projects_url = time_filters(f"{GITLAB_URL}/projects?page={page}&per_page={PER_PAGE}",order_by='id')
+        projects_url = time_filters(f"{GITLAB_URL}/projects?page={page}&per_page={PER_PAGE}&order_by=updated_at")
         projects = await make_api_request(session, projects_url, HEADERS)
         
         if not projects:
@@ -108,7 +106,7 @@ async def get_code_changes(session, project_id):
     
     # 获取提交记录
     commits_url = f"{GITLAB_URL}/projects/{project_id}/repository/commits"
-    commits_url = time_filters(commits_url, since_param='since', until_param='until')
+    commits_url = time_filters(commits_url, 'since', 'until')
     commits = await make_api_request(session, commits_url, HEADERS)
     for commit in commits:
         commit_record = {
@@ -142,7 +140,8 @@ async def get_code_changes(session, project_id):
         all_code_changes.append(merge_record)
 
     # 获取拉取记录
-    pulls_url = time_filters(f"{GITLAB_URL}/projects/{project_id}/events?action=pulled")
+    pulls_url = f"{GITLAB_URL}/projects/{project_id}/events?action=pulled"
+    pulls_url = time_filters(pulls_url, 'after', 'before')
     events = await make_api_request(session, pulls_url, HEADERS)
     for event in events:
         author = event.get("author", {})
@@ -287,7 +286,7 @@ async def track_cicd_config_changes(session, project_id):
     """ 跟踪指定项目中的CI/CD配置变更 """
     project_name = await get_project_name(session, project_id)
     commits_url = f"{GITLAB_URL}/projects/{project_id}/repository/commits"
-    commits_url = time_filters(commits_url, since_param='since', until_param='until')
+    commits_url = time_filters(commits_url, 'since', 'until')
     commits = await make_api_request(session, commits_url, HEADERS)
     all_changes = []
     for commit in commits:
