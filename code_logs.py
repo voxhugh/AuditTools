@@ -112,12 +112,14 @@ async def get_code_changes(session, project_id):
         commit_record = {
             "operation": "commit",
             "time": commit["committed_date"],
+            "author_id": "",
             "author": commit["author_name"],
-            "email": commit.get("author_email", ""),
+            "email": commit["author_email"],
             "message": commit["message"],
             "sha": commit["id"],
             "project_id": project_id,
-            "project_name": project_name
+            "project_name": project_name,
+            "state": ""
         }
         all_code_changes.append(commit_record)
 
@@ -129,6 +131,7 @@ async def get_code_changes(session, project_id):
         merge_record = {
             "operation": "merge_request",
             "time": merge_request["updated_at"],
+            "author_id": merge_request["author"]["id"],
             "author": merge_request["author"]["username"],
             "email": merge_request["author"].get("email", ""),
             "message": merge_request["title"],
@@ -148,12 +151,14 @@ async def get_code_changes(session, project_id):
         pull_record = {
             "operation": "pull",
             "time": event["created_at"],
+            "author_id": event["author_id"],
             "author": author.get("username", "Unknown"),
-            "email": author.get("email", ""),
+            "email": "",
             "message": f"拉取了仓库更新, 涉及的提交: {', '.join([commit['id'] for commit in commits])}",
             "sha": "",
             "project_id": project_id,
-            "project_name": project_name
+            "project_name": project_name,
+            "state": ""
         }
         all_code_changes.append(pull_record)
 
@@ -186,10 +191,13 @@ async def get_audit_records(session, project_id):
     
     for merge_request in merge_requests:
         base_mr_record = {
-            "mr_author": merge_request["author"]["username"],
+            "author_id": merge_request["author"]["id"],
+            "author": merge_request["author"]["username"],
             "mr_title": merge_request["title"],
             "mr_description": merge_request["description"],
+            "assignee_id": merge_request["assignee"]["id"] if merge_request["assignee"] else None,
             "assignee": merge_request["assignee"]["username"] if merge_request["assignee"] else None,
+            "reviewers_ids": [r["id"] for r in merge_request.get("reviewers", [])],
             "reviewers": ", ".join([r["username"] for r in merge_request.get("reviewers", [])]),
             "project_id": project_id,
             "project_name": project_name,
@@ -348,15 +356,16 @@ async def main():
         tasks = [get_code_changes(session, project_id) for project_id in project_ids]
         code_changes = await asyncio.gather(*tasks)
         code_changes = [item for sublist in code_changes for item in sublist]
-        write_to_csv(code_changes, "code_changes.csv", ["operation", "time", "author", "email", "message", "sha", "project_id", "project_name"], sort_key="time")
+        write_to_csv(code_changes, "code_changes.csv", ["operation", "time", "author_id", "author", "email", "message", "sha", "project_id", "project_name", "state"], sort_key="time")
         
         # 并发获取审查和合规记录
         tasks = [get_audit_records(session, project_id) for project_id in project_ids]
         audit_records = await asyncio.gather(*tasks)
         audit_records = [item for sublist in audit_records for item in sublist]
         fieldnames = [
-            "mr_author", "mr_title", "mr_description", "assignee", "reviewers", "time", 
-            "project_id", "project_name", "source_branch", "target_branch", "mr_id", "approval_status", "comments"
+            "author_id", "author", "mr_title", "mr_description", "assignee_id", "assignee", 
+            "reviewers_ids", "reviewers", "time", "project_id", "project_name", "source_branch", 
+            "target_branch", "mr_id", "approval_status", "comments"
         ]
         write_to_csv(audit_records, "audit_records.csv", fieldnames, sort_key="time")
         
@@ -375,7 +384,7 @@ async def main():
         tasks = [track_cicd_config_changes(session, project_id) for project_id in project_ids]
         cicd_changes = await asyncio.gather(*tasks)
         cicd_changes = [item for sublist in cicd_changes for item in sublist]
-        fieldnames = ["change_type", "change_content", "time", "author", "email", "project_id", "project_name", "message", "commit_sha"]
+        fieldnames = ["change_type", "change_content", "time", "author", "project_id", "project_name", "message", "commit_sha"]
         write_to_csv(cicd_changes, "cicd_changes.csv", fieldnames, sort_key="time")
 
 if __name__ == "__main__":
