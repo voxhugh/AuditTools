@@ -28,10 +28,8 @@ PER_PAGE = 100
 SINCE = None  # 开始时间（例如："2024-11-27T00:00:00Z"）
 UNTIL = None  # 结束时间
 
+# 发送GET请求并处理响应
 async def make_api_request(session, url, headers=None):
-    """
-    发送GET请求并处理响应
-    """
     try:
         async with session.get(url, headers=headers) as response:
             response.raise_for_status()
@@ -40,8 +38,8 @@ async def make_api_request(session, url, headers=None):
         logging.error(f"请求失败: {e}")
         return []
 
+# URL - 时间过滤器
 def time_filters(url, since_param='updated_after', until_param='updated_before'):
-    """ 时间过滤 """
     query_params = []
     if SINCE:
         query_params.append(f"{since_param}={SINCE}")
@@ -53,14 +51,30 @@ def time_filters(url, since_param='updated_after', until_param='updated_before')
         return f"{url}{separator}{'&'.join(query_params)}"
     return url
 
+# 记录 - 时间过滤器
+
+since_dt = datetime.fromisoformat(SINCE.replace('Z', '+00:00')) if SINCE else None
+until_dt = datetime.fromisoformat(UNTIL.replace('Z', '+00:00')) if UNTIL else None
+
+def is_within_time(record):
+    event_time = record.get("updated_at") or record.get("created_at", "")
+    if not event_time:
+        return True
+
+    event_datetime = datetime.fromisoformat(event_time.replace('Z', '+00:00'))
+    if since_dt and event_datetime < since_dt:
+        return False
+    if until_dt and event_datetime > until_dt:
+        return False
+    return True
+
+# 获取所有项目的ID
 async def get_project_ids(session):
-    """
-    获取所有项目的ID，并根据时间段筛选
-    """
     project_ids = []
     page = 1
+    base_url = time_filters(f"{GITLAB_URL}/projects")   # 根据时间段初筛
     while True:
-        projects_url = time_filters(f"{GITLAB_URL}/projects?page={page}&per_page={PER_PAGE}&order_by=updated_at")
+        projects_url = f"{base_url}{'&' if '?' in base_url else '?'}page={page}&per_page={PER_PAGE}&order_by=updated_at"
         projects = await make_api_request(session, projects_url, HEADERS)
         
         if not projects:
@@ -71,22 +85,22 @@ async def get_project_ids(session):
     
     return project_ids
 
+# 获取项目名称
 async def get_project_name(session, project_id):
-    """ 获取项目名称 """
     project_url = f"{GITLAB_URL}/projects/{project_id}"
     project_info = await make_api_request(session, project_url, HEADERS)
     return project_info.get("name", "Unknown Project")
 
+# 获取文件的内容
 async def get_file_content(session, project_id, commit_sha, file_path):
-    """ 获取指定提交中文件的内容 """
     content_url = f"{GITLAB_URL}/projects/{project_id}/repository/files/{file_path}?ref={commit_sha}"
     response = await make_api_request(session, content_url, HEADERS)
     if 'content' in response:
         return base64.b64decode(response['content']).decode('utf-8')
     return None
 
+# 比较两个版本的yml文件并返回差异
 def compare_yml_files(old_content, new_content):
-    """ 比较两个版本的yml文件并返回差异 """
     old_lines = old_content.splitlines(keepends=True) if old_content else []
     new_lines = new_content.splitlines(keepends=True) if new_content else []
     diff = list(unified_diff(old_lines, new_lines, fromfile='old', tofile='new'))
@@ -97,10 +111,8 @@ def compare_yml_files(old_content, new_content):
         change_type = "deleted"
     return change_type, ''.join(diff)
 
+# 获取代码变更记录
 async def get_code_changes(session, project_id):
-    """
-    获取指定项目ID的代码变更记录
-    """
     all_code_changes = []
     project_name = await get_project_name(session, project_id)
     
@@ -143,7 +155,7 @@ async def get_code_changes(session, project_id):
         all_code_changes.append(merge_record)
 
     # 获取拉取记录
-    pulls_url = f"{GITLAB_URL}/projects/{project_id}/events?action=pulled"
+    pulls_url = f"{GITLAB_URL}/projects/{project_id}/events?action=pushed"
     pulls_url = time_filters(pulls_url, 'after', 'before')
     events = await make_api_request(session, pulls_url, HEADERS)
     for event in events:
@@ -164,10 +176,8 @@ async def get_code_changes(session, project_id):
 
     return all_code_changes
 
+# 获取指定项目ID和MR IID的所有注释
 async def get_mr_notes(session, project_id, mr_iid):
-    """
-    获取指定项目ID和MR IID的所有注释
-    """
     notes_url = f"{GITLAB_URL}/projects/{project_id}/merge_requests/{mr_iid}/notes"
     notes = await make_api_request(session, notes_url, HEADERS)
     return [
@@ -178,11 +188,9 @@ async def get_mr_notes(session, project_id, mr_iid):
         } for note in notes
     ]
 
-async def get_audit_records(session, project_id):
-    """
-    获取指定项目ID的审查和合规记录
-    """
-    all_audit_records = []
+# 获取审查和合规记录
+async def get_mr_review(session, project_id):
+    all_mr_records = []
     project_name = await get_project_name(session, project_id)
     
         # 获取所有MR
@@ -222,7 +230,7 @@ async def get_audit_records(session, project_id):
                     "time": merge_request[key],
                     "approval_status": value
                 })
-                all_audit_records.append(record)
+                all_mr_records.append(record)
 
         # 获取MR的注释
         notes = await get_mr_notes(session, project_id, merge_request["iid"])
@@ -232,15 +240,13 @@ async def get_audit_records(session, project_id):
                 "content": note["content"],
                 "time": note["time"]
             }
-            if all_audit_records:
-                all_audit_records[-1]["comments"].append(comment)
+            if all_mr_records:
+                all_mr_records[-1]["comments"].append(comment)
 
-    return all_audit_records
+    return all_mr_records
 
+# 获取CI/CD管道记录
 async def get_cicd_pipelines(session, project_id):
-    """
-    获取指定项目ID的CI/CD管道记录
-    """
     pipelines_url = time_filters(f"{GITLAB_URL}/projects/{project_id}/pipelines")
     pipelines = await make_api_request(session, pipelines_url, HEADERS)
     all_pipeline_records = []
@@ -290,8 +296,8 @@ async def get_cicd_pipelines(session, project_id):
     
     return all_pipeline_records
 
+# 跟踪指定项目中的CI/CD配置变更
 async def track_cicd_config_changes(session, project_id):
-    """ 跟踪指定项目中的CI/CD配置变更 """
     project_name = await get_project_name(session, project_id)
     commits_url = f"{GITLAB_URL}/projects/{project_id}/repository/commits"
     commits_url = time_filters(commits_url, 'since', 'until')
@@ -327,10 +333,109 @@ async def track_cicd_config_changes(session, project_id):
     
     return all_changes
 
+# 获取所有审计记录（用户/项目/组）
+async def get_audit_records(session):
+    all_audit_records = []
+    base_url = f"{GITLAB_URL}/audit_events"
+    base_url = time_filters(base_url, 'created_after', 'created_before')
+    page = 1
+    while True:
+        events_url = f"{base_url}{'&' if '?' in base_url else '?'}page={page}&per_page={PER_PAGE}"
+        audit_events = await make_api_request(session, events_url, HEADERS)
+        if not audit_events or isinstance(audit_events, dict):
+            break
+        
+        for event in audit_events:
+            details = event.get("details", {})
+            operation = None
+
+            # 根据存在的键确定operation，并设置event字段
+            if "change" in details:
+                operation = "change"
+            elif "add" in details:
+                operation = "add"
+            elif "remove" in details:
+                operation = "remove"
+            else:
+                operation = ""
+
+            record = {
+                "author_id": event.get("author_id", ""),
+                "author": details.get("author_name", ""),
+                "entity_id": event.get("entity_id", ""),
+                "entity_type": event.get("entity_type", ""),
+                "time": event["created_at"],
+                "operation": operation,
+                "event": event["event_name"],
+                "target_id": details.get("target_id", ""),
+                "target_type": details.get("target_type", ""),
+                "target_name": details.get("target_details", ""),
+                "per_details": f"{details.get('from', '')}:{details.get('to', '')}" if "change" in details else "",
+                "mem_details": details.get("as", ""),
+                "add_message": details.get("custom_message", "")
+            }
+            all_audit_records.append(record)
+        
+        page += 1
+    
+    return all_audit_records
+
+# 处理和格式化系统记录
+def process_records(records, event_type, affected_entity):
+    processed_records = []
+    for record in records:
+        event_id = record.get("id", "")
+        event_time = record.get("updated_at") or record.get("created_at", "")
+        entity_name = record.get("name", "") or record.get("url", "")
+        processed_records.append({
+            "event_id": event_id,
+            "time": event_time,
+            "event_type": event_type,
+            "affected_entity": affected_entity,
+            "entity_name": entity_name,
+            "feature_flag_state": record.get('state', ''),
+            "webhook_events": ', '.join([k for k, v in record.items() if k.endswith('_events') and v])
+        })
+    return processed_records
+
+# 获取通用变更记录
+async def get_changes(session, endpoint, event_type, affected_entity):
+    url = f"{GITLAB_URL}/{endpoint}"
+    changes = await make_api_request(session, url, HEADERS)
+    if isinstance(changes, dict):  # 如果返回的是单个对象而不是列表，则转换为列表
+        changes = [changes]
+    filtered_changes = [change for change in changes if is_within_time(change)]
+    return process_records(filtered_changes, event_type, affected_entity)
+
+# 获取应用设置变更
+async def get_application_settings_changes(session):
+    return await get_changes(session, "application/settings", "setting_change", "application_setting")
+
+# 获取功能标志变更
+async def get_feature_flag_changes(session):
+    return await get_changes(session, "features", "feature_flag_change", "feature_flag")
+
+# 获取Webhooks变更
+async def get_webhooks(session):
+    return await get_changes(session, "hooks", "webhook_change", "webhook")
+
+# 获取所有系统级别变更记录
+async def get_system_level_changes(session):
+    async with aiohttp.ClientSession() as session:
+        tasks = [
+            get_application_settings_changes(session),
+            get_feature_flag_changes(session),
+            get_webhooks(session)
+        ]
+        
+        results = await asyncio.gather(*tasks)
+        all_records = []
+        for result in results:
+            all_records.extend(result)  # 每个result已经是经过process_records处理过的
+        return all_records
+
+# 将记录按时间升序追加到CSV文件
 def write_to_csv(records, filename, fieldnames, sort_key="time"):
-    """
-    将记录按时间升序追加到CSV文件中，不存在则创建
-    """
     if sort_key:
         sorted_records = sorted(records, key=lambda x: x.get(sort_key, ""))
     else:
@@ -356,18 +461,22 @@ async def main():
         tasks = [get_code_changes(session, project_id) for project_id in project_ids]
         code_changes = await asyncio.gather(*tasks)
         code_changes = [item for sublist in code_changes for item in sublist]
-        write_to_csv(code_changes, "code_changes.csv", ["operation", "time", "author_id", "author", "email", "message", "sha", "project_id", "project_name", "state"], sort_key="time")
+        fieldnames = [
+            "operation", "time", "author_id", "author", "email",
+            "message", "sha", "project_id", "project_name", "state"
+        ]
+        write_to_csv(code_changes, "code_changes.csv", fieldnames, sort_key="time")
         
         # 并发获取审查和合规记录
-        tasks = [get_audit_records(session, project_id) for project_id in project_ids]
-        audit_records = await asyncio.gather(*tasks)
-        audit_records = [item for sublist in audit_records for item in sublist]
+        tasks = [get_mr_review(session, project_id) for project_id in project_ids]
+        mr_reviews = await asyncio.gather(*tasks)
+        mr_reviews = [item for sublist in mr_reviews for item in sublist]
         fieldnames = [
             "author_id", "author", "mr_title", "mr_description", "assignee_id", "assignee", 
             "reviewers_ids", "reviewers", "time", "project_id", "project_name", "source_branch", 
             "target_branch", "mr_id", "approval_status", "comments"
         ]
-        write_to_csv(audit_records, "audit_records.csv", fieldnames, sort_key="time")
+        write_to_csv(mr_reviews, "mr_reviews.csv", fieldnames, sort_key="time")
         
         # 并发获取CI/CD管道记录
         tasks = [get_cicd_pipelines(session, project_id) for project_id in project_ids]
@@ -384,8 +493,27 @@ async def main():
         tasks = [track_cicd_config_changes(session, project_id) for project_id in project_ids]
         cicd_changes = await asyncio.gather(*tasks)
         cicd_changes = [item for sublist in cicd_changes for item in sublist]
-        fieldnames = ["change_type", "change_content", "time", "author", "project_id", "project_name", "message", "commit_sha"]
+        fieldnames = [
+            "change_type", "change_content", "time", "author",
+            "project_id", "project_name", "message", "commit_sha"
+        ]
         write_to_csv(cicd_changes, "cicd_changes.csv", fieldnames, sort_key="time")
+
+        # 获取审计记录
+        audit_records = await get_audit_records(session)
+        fieldnames = [
+            "author_id", "author", "entity_id", "entity_type", "time", "operation", "event", 
+            "target_id", "target_type", "target_name", "per_details", "mem_details", "add_message"
+        ]
+        write_to_csv(audit_records, "audit_records.csv", fieldnames, sort_key="time")
+
+        # 获取所有系统级别变更记录
+        all_changes = await get_system_level_changes(session)
+        fieldnames = [
+            "event_id", "time", "event_type", "affected_entity",
+            "entity_name", "feature_flag_state", "webhook_events"
+        ]
+        write_to_csv(all_changes, "all_system_changes.csv", fieldnames, sort_key="time")
 
 if __name__ == "__main__":
     asyncio.run(main())
