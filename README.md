@@ -16,13 +16,9 @@ Including but not limited to:
 
 ### explain
 
-`audit_logs.py`
+`ultimate_logs.py`
 
-- Acquire users/proj/groups and system changes
-
-`code_logs.py`
-
-- Acquire code changes, audits and compliance, CI/CD pipelines
+- Acquire all changes from api
 
 `native_logs.py`
 
