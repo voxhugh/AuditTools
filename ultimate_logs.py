@@ -25,8 +25,8 @@ if not ACCESS_TOKEN:
 # 常量
 HEADERS = {"PRIVATE-TOKEN": ACCESS_TOKEN}
 PER_PAGE = 100
-SINCE = None  # 开始时间（例如："2024-11-27T00:00:00Z"）
-UNTIL = None  # 结束时间
+SINCE = "2024-11-26T00:00:00Z"  # 开始时间（例如："2024-11-27T00:00:00Z"）
+UNTIL = "2024-12-10T00:00:00Z"  # 结束时间
 
 since_dt = datetime.fromisoformat(SINCE.replace('Z', '+00:00')) if SINCE else None
 until_dt = datetime.fromisoformat(UNTIL.replace('Z', '+00:00')) if UNTIL else None
@@ -458,7 +458,7 @@ async def get_system_level_changes(session, project_ids):
     ]
     # 收集所有结果，合并记录
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    
+
     all_records = []
     for result in results:
         if isinstance(result, Exception):
@@ -496,7 +496,10 @@ async def fetch_and_write_records(session, project_ids, fetch_func, filename, fi
 async def main():
     async with aiohttp.ClientSession() as session:
         try:
-            project_ids = await get_project_ids(session)    # 获取项目ID并初步筛选
+            logging.info("Starting the script execution.")
+
+            project_ids = await get_project_ids(session)        # 获取项目id & 初筛
+            logging.info(f"Retrieved {len(project_ids)} project IDs.")
 
             await fetch_and_write_records(session, project_ids, get_code_changes, "code_changes.csv", 'code_changes')
             await fetch_and_write_records(session, project_ids, get_mr_review, "mr_reviews.csv", 'mr_reviews')
@@ -508,6 +511,8 @@ async def main():
 
             system_level_changes = await get_system_level_changes(session, project_ids)
             write_to_csv(system_level_changes, "all_system_changes.csv", FIELDNAMES['all_system_changes'])
+
+            logging.info("Script execution completed successfully.")
         except Exception as e:
             logging.error(f"An error occurred during the execution of main: {e}")
 
