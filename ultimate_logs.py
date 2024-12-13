@@ -28,6 +28,34 @@ PER_PAGE = 100
 SINCE = None  # 开始时间（例如："2024-11-27T00:00:00Z"）
 UNTIL = None  # 结束时间
 
+since_dt = datetime.fromisoformat(SINCE.replace('Z', '+00:00')) if SINCE else None
+until_dt = datetime.fromisoformat(UNTIL.replace('Z', '+00:00')) if UNTIL else None
+
+
+FIELDNAMES = {
+    'code_changes':
+            ["operation", "time", "author_id", "author", "email",
+            "message", "sha", "project_id", "project_name", "state"],
+    'mr_reviews':
+            ["author_id", "author", "mr_title", "mr_description", "assignee_id", "assignee", 
+            "reviewers_ids", "reviewers", "time", "project_id", "project_name", "source_branch", 
+            "target_branch", "mr_id", "approval_status", "comments"],
+    'cicd_pipelines':
+            ["project_id", "project_name", "branch", "pipeline_id", "stage_name", 
+            "job_name", "job_status", "time", "end_time", "duration", 
+            "triggered_by", "environment", "commit_sha"],
+    'cicd_changes':
+            ["change_type", "change_content", "time", "author",
+            "project_id", "project_name", "message", "commit_sha"],
+    'audit_records':
+            ["author_id", "author", "entity_id", "entity_type", "time", "operation", "event", 
+            "target_id", "target_type", "target_name", "per_details", "mem_details", "add_message"],
+    'all_system_changes':
+            ["event_id", "time", "event_type", "affected_entity","entity_name", 
+            "webhook_events", "feature_flag_version", "flag_description", "flag_state"]
+}
+
+
 # 发送GET请求并处理响应
 async def make_api_request(session, url, headers=None):
     try:
@@ -52,10 +80,6 @@ def time_filters(url, since_param='updated_after', until_param='updated_before')
     return url
 
 # 记录 - 时间过滤器
-
-since_dt = datetime.fromisoformat(SINCE.replace('Z', '+00:00')) if SINCE else None
-until_dt = datetime.fromisoformat(UNTIL.replace('Z', '+00:00')) if UNTIL else None
-
 def is_within_time(record):
     event_time = record.get("updated_at") or record.get("created_at", "")
     if not event_time:
@@ -387,18 +411,22 @@ def process_records(records, event_type, affected_entity):
         event_id = record.get("id", "")
         event_time = record.get("updated_at") or record.get("created_at", "")
         entity_name = record.get("name", "") or record.get("url", "")
+        feature_flag_version =  record.get("version", "")
+        flag_description = record.get("description", "")
         processed_records.append({
             "event_id": event_id,
             "time": event_time,
             "event_type": event_type,
             "affected_entity": affected_entity,
             "entity_name": entity_name,
-            "feature_flag_state": record.get('state', ''),
-            "webhook_events": ', '.join([k for k, v in record.items() if k.endswith('_events') and v])
+            "webhook_events": ', '.join([k for k, v in record.items() if k.endswith('_events') and v]),
+            "feature_flag_version": feature_flag_version,
+            "flag_description": flag_description,
+            "flag_state": "active" if record.get("active") else "inactive" if "active" in record else ""
         })
     return processed_records
 
-# 获取通用变更记录
+# 获取通用变更记录  (本地筛选)
 async def get_changes(session, endpoint, event_type, affected_entity):
     url = f"{GITLAB_URL}/{endpoint}"
     changes = await make_api_request(session, url, HEADERS)
@@ -412,27 +440,33 @@ async def get_application_settings_changes(session):
     return await get_changes(session, "application/settings", "setting_change", "application_setting")
 
 # 获取功能标志变更
-async def get_feature_flag_changes(session):
-    return await get_changes(session, "features", "feature_flag_change", "feature_flag")
+async def get_feature_flag_changes(session, project_id):
+    enpoint = f"projects/{project_id}/feature_flags"
+    return await get_changes(session, enpoint, "feature_flag_change", "feature_flag")
 
-# 获取Webhooks变更
+# 获取Webhooks变更  （系统钩子）
 async def get_webhooks(session):
     return await get_changes(session, "hooks", "webhook_change", "webhook")
 
 # 获取所有系统级别变更记录
-async def get_system_level_changes(session):
-    async with aiohttp.ClientSession() as session:
-        tasks = [
-            get_application_settings_changes(session),
-            get_feature_flag_changes(session),
-            get_webhooks(session)
-        ]
-        
-        results = await asyncio.gather(*tasks)
-        all_records = []
-        for result in results:
-            all_records.extend(result)  # 每个result已经是经过process_records处理过的
-        return all_records
+async def get_system_level_changes(session, project_ids):
+    # 创建并发任务列表
+    tasks = [
+        get_application_settings_changes(session),
+        get_webhooks(session),
+        *[get_feature_flag_changes(session, project_id) for project_id in project_ids]  # 为每个项目创建获取功能标志变更的任务
+    ]
+    # 收集所有结果，合并记录
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    all_records = []
+    for result in results:
+        if isinstance(result, Exception):
+            logging.error(f"Error fetching system level changes: {result}")
+        else:
+            all_records.extend(result)
+    
+    return all_records
 
 # 将记录按时间升序追加到CSV文件
 def write_to_csv(records, filename, fieldnames, sort_key="time"):
@@ -451,69 +485,31 @@ def write_to_csv(records, filename, fieldnames, sort_key="time"):
                 record["comments"] = comments
             writer.writerow({k: record.get(k, "") for k in fieldnames})
 
+# 并发获取记录并写入CSV文件
+async def fetch_and_write_records(session, project_ids, fetch_func, filename, fieldnames_key, sort_key="time"):
+    tasks = [fetch_func(session, project_id) for project_id in project_ids]
+    records_lists = await asyncio.gather(*tasks, return_exceptions=True)
+    all_records = [item for sublist in records_lists for item in sublist]
+
+    write_to_csv(all_records, filename, FIELDNAMES[fieldnames_key], sort_key)
+
 async def main():
-    
     async with aiohttp.ClientSession() as session:
-        # 获取项目ID并初步筛选
-        project_ids = await get_project_ids(session)
-        
-        # 并发获取代码变更记录
-        tasks = [get_code_changes(session, project_id) for project_id in project_ids]
-        code_changes = await asyncio.gather(*tasks)
-        code_changes = [item for sublist in code_changes for item in sublist]
-        fieldnames = [
-            "operation", "time", "author_id", "author", "email",
-            "message", "sha", "project_id", "project_name", "state"
-        ]
-        write_to_csv(code_changes, "code_changes.csv", fieldnames, sort_key="time")
-        
-        # 并发获取审查和合规记录
-        tasks = [get_mr_review(session, project_id) for project_id in project_ids]
-        mr_reviews = await asyncio.gather(*tasks)
-        mr_reviews = [item for sublist in mr_reviews for item in sublist]
-        fieldnames = [
-            "author_id", "author", "mr_title", "mr_description", "assignee_id", "assignee", 
-            "reviewers_ids", "reviewers", "time", "project_id", "project_name", "source_branch", 
-            "target_branch", "mr_id", "approval_status", "comments"
-        ]
-        write_to_csv(mr_reviews, "mr_reviews.csv", fieldnames, sort_key="time")
-        
-        # 并发获取CI/CD管道记录
-        tasks = [get_cicd_pipelines(session, project_id) for project_id in project_ids]
-        cicd_pipelines = await asyncio.gather(*tasks)
-        cicd_pipelines = [item for sublist in cicd_pipelines for item in sublist]
-        fieldnames = [
-            "project_id", "project_name", "branch", "pipeline_id", "stage_name", 
-            "job_name", "job_status", "time", "end_time", "duration", 
-            "triggered_by", "environment", "commit_sha"
-        ]
-        write_to_csv(cicd_pipelines, "cicd_pipelines.csv", fieldnames, sort_key="time")
-        
-        # 并发获取CI/CD配置变更记录
-        tasks = [track_cicd_config_changes(session, project_id) for project_id in project_ids]
-        cicd_changes = await asyncio.gather(*tasks)
-        cicd_changes = [item for sublist in cicd_changes for item in sublist]
-        fieldnames = [
-            "change_type", "change_content", "time", "author",
-            "project_id", "project_name", "message", "commit_sha"
-        ]
-        write_to_csv(cicd_changes, "cicd_changes.csv", fieldnames, sort_key="time")
+        try:
+            project_ids = await get_project_ids(session)    # 获取项目ID并初步筛选
 
-        # 获取审计记录
-        audit_records = await get_audit_records(session)
-        fieldnames = [
-            "author_id", "author", "entity_id", "entity_type", "time", "operation", "event", 
-            "target_id", "target_type", "target_name", "per_details", "mem_details", "add_message"
-        ]
-        write_to_csv(audit_records, "audit_records.csv", fieldnames, sort_key="time")
+            await fetch_and_write_records(session, project_ids, get_code_changes, "code_changes.csv", 'code_changes')
+            await fetch_and_write_records(session, project_ids, get_mr_review, "mr_reviews.csv", 'mr_reviews')
+            await fetch_and_write_records(session, project_ids, get_cicd_pipelines, "cicd_pipelines.csv", 'cicd_pipelines')
+            await fetch_and_write_records(session, project_ids, track_cicd_config_changes, "cicd_changes.csv", 'cicd_changes')
 
-        # 获取所有系统级别变更记录
-        all_changes = await get_system_level_changes(session)
-        fieldnames = [
-            "event_id", "time", "event_type", "affected_entity",
-            "entity_name", "feature_flag_state", "webhook_events"
-        ]
-        write_to_csv(all_changes, "all_system_changes.csv", fieldnames, sort_key="time")
+            audit_records = await get_audit_records(session)
+            write_to_csv(audit_records, "audit_records.csv", FIELDNAMES['audit_records'])
+
+            system_level_changes = await get_system_level_changes(session, project_ids)
+            write_to_csv(system_level_changes, "all_system_changes.csv", FIELDNAMES['all_system_changes'])
+        except Exception as e:
+            logging.error(f"An error occurred during the execution of main: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
