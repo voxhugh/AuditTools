@@ -25,8 +25,8 @@ if not ACCESS_TOKEN:
 # 常量
 HEADERS = {"PRIVATE-TOKEN": ACCESS_TOKEN}
 PER_PAGE = 100
-SINCE = "2024-11-26T00:00:00Z"  # 开始时间（例如："2024-11-27T00:00:00Z"）
-UNTIL = "2024-12-10T00:00:00Z"  # 结束时间
+SINCE = None  # 开始时间（例如："2024-11-27T00:00:00Z"）
+UNTIL = None  # 结束时间
 
 since_dt = datetime.fromisoformat(SINCE.replace('Z', '+00:00')) if SINCE else None
 until_dt = datetime.fromisoformat(UNTIL.replace('Z', '+00:00')) if UNTIL else None
@@ -49,7 +49,7 @@ FIELDNAMES = {
             "project_id", "project_name", "message", "commit_sha"],
     'audit_records':
             ["author_id", "author", "entity_id", "entity_type", "time", "operation", "event", 
-            "target_id", "target_type", "target_name", "per_details", "mem_details", "add_message"],
+            "target_id", "target_type", "target_name", "per_details", "mem_details", "add_message", "ip"],
     'all_system_changes':
             ["event_id", "time", "event_type", "affected_entity","entity_name", 
             "webhook_events", "feature_flag_version", "flag_description", "flag_state"]
@@ -396,7 +396,8 @@ async def get_audit_records(session):
                 "target_name": details.get("target_details", ""),
                 "per_details": f"{details.get('from', '')}:{details.get('to', '')}" if "change" in details else "",
                 "mem_details": details.get("as", ""),
-                "add_message": details.get("custom_message", "")
+                "add_message": details.get("custom_message", ""),
+                "ip":details.get("ip_address","")
             }
             all_audit_records.append(record)
         
