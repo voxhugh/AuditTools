@@ -6,6 +6,7 @@ from difflib import unified_diff
 import base64
 import logging
 import os
+import pytz
 
 # 配置日志
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -34,19 +35,16 @@ until_dt = datetime.fromisoformat(UNTIL.replace('Z', '+00:00')) if UNTIL else No
 
 FIELDNAMES = {
     'code_changes':
-            ["operation", "time", "author_id", "author", "email",
-            "message", "sha", "project_id", "project_name", "state"],
+            ["operation", "time", "author_id", "author", "email", "message", "sha", "project_id", "state"],
     'mr_reviews':
             ["author_id", "author", "mr_title", "mr_description", "assignee_id", "assignee", 
-            "reviewers_ids", "reviewers", "time", "project_id", "project_name", "source_branch", 
-            "target_branch", "mr_id", "approval_status", "comments"],
+            "reviewers_ids", "reviewers", "time", "project_id", "source_branch", "target_branch", 
+            "mr_id", "approval_status", "comments"],
     'cicd_pipelines':
-            ["project_id", "project_name", "branch", "pipeline_id", "stage_name", 
-            "job_name", "job_status", "time", "end_time", "duration", 
-            "triggered_by", "environment", "commit_sha"],
+            ["project_id", "branch", "pipeline_id", "stage_name", "job_name", "job_status", "time", 
+            "end_time", "duration", "triggered_by", "environment", "commit_sha"],
     'cicd_changes':
-            ["change_type", "change_content", "time", "author",
-            "project_id", "project_name", "message", "commit_sha"],
+            ["change_type", "change_content", "time", "author", "project_id", "message", "commit_sha"],
     'audit_records':
             ["author_id", "author", "entity_id", "entity_type", "time", "operation", "event", 
             "target_id", "target_type", "target_name", "per_details", "mem_details", "add_message", "ip"],
@@ -138,7 +136,7 @@ def compare_yml_files(old_content, new_content):
 # 获取代码变更记录
 async def get_code_changes(session, project_id):
     all_code_changes = []
-    project_name = await get_project_name(session, project_id)
+    # project_name = await get_project_name(session, project_id)
     
     # 获取提交记录
     commits_url = f"{GITLAB_URL}/projects/{project_id}/repository/commits"
@@ -154,7 +152,7 @@ async def get_code_changes(session, project_id):
             "message": commit["message"],
             "sha": commit["id"],
             "project_id": project_id,
-            "project_name": project_name,
+            # "project_name": project_name,
             "state": ""
         }
         all_code_changes.append(commit_record)
@@ -173,27 +171,29 @@ async def get_code_changes(session, project_id):
             "message": merge_request["title"],
             "sha": "",
             "project_id": project_id,
-            "project_name": project_name,
+            # "project_name": project_name,
             "state": state
         }
         all_code_changes.append(merge_record)
 
-    # 获取拉取记录
+    # 获取推送记录
     pulls_url = f"{GITLAB_URL}/projects/{project_id}/events?action=pushed"
     pulls_url = time_filters(pulls_url, 'after', 'before')
     events = await make_api_request(session, pulls_url, HEADERS)
     for event in events:
         author = event.get("author", {})
+        p1 = event["push_data"]["commit_from"] or ""
+        p2 = event["push_data"]["commit_to"] or ""
         pull_record = {
-            "operation": "pull",
+            "operation": "push",
             "time": event["created_at"],
             "author_id": event["author_id"],
             "author": author.get("username", "Unknown"),
             "email": "",
-            "message": f"拉取了仓库更新, 涉及的提交: {', '.join([commit['id'] for commit in commits])}",
+            "message": f"推送了仓库更新, 涉及的提交：{p1},{p2}",
             "sha": "",
             "project_id": project_id,
-            "project_name": project_name,
+            # "project_name": project_name,
             "state": ""
         }
         all_code_changes.append(pull_record)
@@ -215,7 +215,7 @@ async def get_mr_notes(session, project_id, mr_iid):
 # 获取审查和合规记录
 async def get_mr_review(session, project_id):
     all_mr_records = []
-    project_name = await get_project_name(session, project_id)
+    # project_name = await get_project_name(session, project_id)
     
         # 获取所有MR
     merge_requests_url = time_filters(f"{GITLAB_URL}/projects/{project_id}/merge_requests")
@@ -232,7 +232,7 @@ async def get_mr_review(session, project_id):
             "reviewers_ids": [r["id"] for r in merge_request.get("reviewers", [])],
             "reviewers": ", ".join([r["username"] for r in merge_request.get("reviewers", [])]),
             "project_id": project_id,
-            "project_name": project_name,
+            # "project_name": project_name,
             "source_branch": merge_request["source_branch"],
             "target_branch": merge_request["target_branch"],
             "mr_id": merge_request["iid"],
@@ -276,7 +276,7 @@ async def get_cicd_pipelines(session, project_id):
     all_pipeline_records = []
     for pipeline in pipelines:
         pipeline_id = pipeline.get("id", "Unknown ID")
-        project_name = await get_project_name(session, project_id)
+        # project_name = await get_project_name(session, project_id)
         branch = pipeline.get("ref", "Unknown Branch")
         time = pipeline.get("created_at", "Unknown Start Time")  # 使用 created_at 作为 time
         end_time = pipeline.get("updated_at", "Unknown End Time")
@@ -303,7 +303,7 @@ async def get_cicd_pipelines(session, project_id):
             
             pipeline_record = {
                 "project_id": project_id,
-                "project_name": project_name,
+                # "project_name": project_name,
                 "branch": branch,
                 "pipeline_id": pipeline_id,
                 "stage_name": stage_name,
@@ -322,7 +322,7 @@ async def get_cicd_pipelines(session, project_id):
 
 # 跟踪指定项目中的CI/CD配置变更
 async def track_cicd_config_changes(session, project_id):
-    project_name = await get_project_name(session, project_id)
+    # project_name = await get_project_name(session, project_id)
     commits_url = f"{GITLAB_URL}/projects/{project_id}/repository/commits"
     commits_url = time_filters(commits_url, 'since', 'until')
     commits = await make_api_request(session, commits_url, HEADERS)
@@ -349,7 +349,7 @@ async def track_cicd_config_changes(session, project_id):
                     "time": commit["committed_date"],
                     "author": commit["author_name"],
                     "project_id": project_id,
-                    "project_name": project_name,
+                    # "project_name": project_name,
                     "message": commit["message"],
                     "commit_sha": commit_sha
                 }
@@ -494,7 +494,41 @@ async def fetch_and_write_records(session, project_ids, fetch_func, filename, fi
 
     write_to_csv(all_records, filename, FIELDNAMES[fieldnames_key], sort_key)
 
+# 动态生成目标目录
+def generate_audit_directory_name():
+    # 北京时间
+    global since_dt, until_dt
+    start_time = since_dt
+    end_time = until_dt
+    if start_time:
+        start_time = start_time.replace(tzinfo=pytz.utc).astimezone(pytz.timezone('Asia/Shanghai'))
+    if end_time:
+        end_time = end_time.replace(tzinfo=pytz.utc).astimezone(pytz.timezone('Asia/Shanghai'))
+    else:
+        beijing_tz = pytz.timezone('Asia/Shanghai')
+        end_time = datetime.now(beijing_tz)
+    # 判断时间精度
+    if start_time and end_time:
+        if (end_time - start_time).days <= 7:
+            time_precision = 'D'
+        elif (end_time - start_time).days <= 30:
+            time_precision = 'W'
+        elif (end_time - start_time).days <= 90:
+            time_precision = 'M'
+        else:
+            time_precision = 'Q'
+        return f"Audit_Output_{time_precision}_{start_time.strftime('%Y%m%d')}-{end_time.strftime('%Y%m%d')}"
+    else:
+        # 缺省则返回：19700101-当前时间
+        current_time_str = end_time.strftime('%Y%m%d')
+        return f'Audit_Output_ALL_19700101-{current_time_str}'
+
 async def main():
+    
+    directory_name = generate_audit_directory_name()        # 生成目录
+    if not os.path.exists(directory_name):
+        os.makedirs(directory_name)
+
     async with aiohttp.ClientSession() as session:
         try:
             logging.info("Starting the script execution.")
@@ -502,16 +536,16 @@ async def main():
             project_ids = await get_project_ids(session)        # 获取项目id & 初筛
             logging.info(f"Retrieved {len(project_ids)} project IDs.")
 
-            await fetch_and_write_records(session, project_ids, get_code_changes, "code_changes.csv", 'code_changes')
-            await fetch_and_write_records(session, project_ids, get_mr_review, "mr_reviews.csv", 'mr_reviews')
-            await fetch_and_write_records(session, project_ids, get_cicd_pipelines, "cicd_pipelines.csv", 'cicd_pipelines')
-            await fetch_and_write_records(session, project_ids, track_cicd_config_changes, "cicd_changes.csv", 'cicd_changes')
+            await fetch_and_write_records(session, project_ids, get_code_changes, f"{directory_name}/code_changes.csv", 'code_changes')
+            await fetch_and_write_records(session, project_ids, get_mr_review, f"{directory_name}/mr_reviews.csv", 'mr_reviews')
+            await fetch_and_write_records(session, project_ids, get_cicd_pipelines, f"{directory_name}/cicd_pipelines.csv", 'cicd_pipelines')
+            await fetch_and_write_records(session, project_ids, track_cicd_config_changes, f"{directory_name}/cicd_changes.csv", 'cicd_changes')
 
             audit_records = await get_audit_records(session)
-            write_to_csv(audit_records, "audit_records.csv", FIELDNAMES['audit_records'])
+            write_to_csv(audit_records, f"{directory_name}/audit_records.csv", FIELDNAMES['audit_records'])
 
             system_level_changes = await get_system_level_changes(session, project_ids)
-            write_to_csv(system_level_changes, "all_system_changes.csv", FIELDNAMES['all_system_changes'])
+            write_to_csv(system_level_changes, f"{directory_name}/all_system_changes.csv", FIELDNAMES['all_system_changes'])
 
             logging.info("Script execution completed successfully.")
         except Exception as e:
