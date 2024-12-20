@@ -7,6 +7,7 @@ import base64
 import logging
 import os
 import pytz
+import re
 
 # 配置日志
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -35,22 +36,32 @@ until_dt = datetime.fromisoformat(UNTIL.replace('Z', '+00:00')) if UNTIL else No
 
 FIELDNAMES = {
     'code_changes':
-            ["operation", "time", "author_id", "author", "email", "message", "sha", "project_id", "state"],
+            ["operation", "time", "author_id", "author", "email", "message", "sha", "project_id", "mr_state"],
     'mr_reviews':
             ["author_id", "author", "mr_title", "mr_description", "assignee_id", "assignee", 
             "reviewers_ids", "reviewers", "time", "project_id", "source_branch", "target_branch", 
             "mr_id", "approval_status", "comments"],
     'cicd_pipelines':
-            ["project_id", "branch", "pipeline_id", "stage_name", "job_name", "job_status", "time", 
+            ["project_id", "branch", "pipeline_id", "stage", "job_name", "job_status", "time", 
             "end_time", "duration", "triggered_by", "environment", "commit_sha"],
     'cicd_changes':
             ["change_type", "change_content", "time", "author", "project_id", "message", "commit_sha"],
     'audit_records':
             ["author_id", "author", "entity_id", "entity_type", "time", "operation", "event", 
-            "target_id", "target_type", "target_name", "per_details", "mem_details", "add_message", "ip"],
+            "target_id", "target_type", "target_name", "pre_post", "last_role", "add_info_", "ip"],
     'all_system_changes':
-            ["event_id", "time", "event_type", "affected_entity","entity_name", 
-            "webhook_events", "feature_flag_version", "flag_description", "flag_state"]
+            ["event_id", "event", "entity_type", "time", "entity_name", "entity_description", 
+            "entity_details", "hook_events", "flag_state"]
+}
+
+# 预编译关键词到操作性质的映射
+operation_patterns = {
+    "create": [re.compile(r"\b(add|created|added|new|inserted|registered|generate)\b", re.IGNORECASE),
+               re.compile(r"\b(create|generation|generated)\b", re.IGNORECASE)],
+    "update": [re.compile(r"\b(change|updated|modify|modified|edit|edited|alter|altered)\b", re.IGNORECASE),
+               re.compile(r"\b(update|revision|revised)\b", re.IGNORECASE)],
+    "delete": [re.compile(r"\b(remove|destroyed|deleted|eliminated|dropped|unregister)\b", re.IGNORECASE),
+               re.compile(r"\b(delete|deletion|deregister)\b", re.IGNORECASE)]
 }
 
 
@@ -111,7 +122,7 @@ async def get_project_ids(session):
 async def get_project_name(session, project_id):
     project_url = f"{GITLAB_URL}/projects/{project_id}"
     project_info = await make_api_request(session, project_url, HEADERS)
-    return project_info.get("name", "Unknown Project")
+    return project_info.get("name", "")
 
 # 获取文件的内容
 async def get_file_content(session, project_id, commit_sha, file_path):
@@ -133,10 +144,62 @@ def compare_yml_files(old_content, new_content):
         change_type = "deleted"
     return change_type, ''.join(diff)
 
+# 检查给定值中是否包含匹配的操作性质关键字
+def check_keywords(value, patterns=operation_patterns):
+    if not value:
+        return None
+    value_str = str(value).lower()
+    for op_type, compiled_patterns in patterns.items():
+        if any(pattern.search(value_str) for pattern in compiled_patterns):
+            return op_type
+    return None
+
+# 返回记录的操作性质
+def classify_event_operation(event, keys, nested_keys=None):
+    nested_keys = nested_keys or []
+
+    # 第一步：检查嵌套键中的键名
+    if nested_keys:
+        nested_dict = event
+        try:
+            for key in nested_keys:
+                nested_dict = nested_dict[key]
+            if isinstance(nested_dict, dict):
+                for key in nested_dict.keys():
+                    if (found_op := check_keywords(key)):
+                        return found_op
+        except (KeyError, TypeError):
+            pass
+
+    # 第二步：检查指定键的值
+    for key in keys:
+        if (found_op := check_keywords(event.get(key))):
+            return found_op
+
+    # 第三步：再次检查嵌套键中的值
+    if nested_keys:
+        try:
+            nested_value = event
+            for key in nested_keys:
+                nested_value = nested_value[key]
+            if isinstance(nested_value, dict):
+                for sub_value in nested_value.values():
+                    if (found_op := check_keywords(sub_value)):
+                        return found_op
+            elif isinstance(nested_value, list):
+                for item in nested_value:
+                    if (found_op := check_keywords(item)):
+                        return found_op
+            elif nested_value is not None and (found_op := check_keywords(nested_value)):
+                return found_op
+        except (KeyError, TypeError):
+            pass
+
+    return "others"
+
 # 获取代码变更记录
 async def get_code_changes(session, project_id):
     all_code_changes = []
-    # project_name = await get_project_name(session, project_id)
     
     # 获取提交记录
     commits_url = f"{GITLAB_URL}/projects/{project_id}/repository/commits"
@@ -145,15 +208,14 @@ async def get_code_changes(session, project_id):
     for commit in commits:
         commit_record = {
             "operation": "commit",
-            "time": commit["committed_date"],
+            "time": commit.get("committed_date",""),
             "author_id": "",
-            "author": commit["author_name"],
-            "email": commit["author_email"],
-            "message": commit["message"],
-            "sha": commit["id"],
+            "author": commit.get("author_name",""),
+            "email": commit.get("author_email",""),
+            "message": commit.get("message"),
+            "sha": commit.get("id"),
             "project_id": project_id,
-            # "project_name": project_name,
-            "state": ""
+            "mr_state": ""
         }
         all_code_changes.append(commit_record)
 
@@ -161,18 +223,17 @@ async def get_code_changes(session, project_id):
     merge_requests_url = time_filters(f"{GITLAB_URL}/projects/{project_id}/merge_requests")
     merge_requests = await make_api_request(session, merge_requests_url, HEADERS)
     for merge_request in merge_requests:
-        state = merge_request["state"]
+        author = merge_request.get("author",{})
         merge_record = {
             "operation": "merge_request",
-            "time": merge_request["updated_at"],
-            "author_id": merge_request["author"]["id"],
-            "author": merge_request["author"]["username"],
-            "email": merge_request["author"].get("email", ""),
-            "message": merge_request["title"],
+            "time": merge_request.get("updated_at",""),
+            "author_id": author.get("id",""),
+            "author": author.get("username",""),
+            "email": "",
+            "message": merge_request.get("title"),
             "sha": "",
             "project_id": project_id,
-            # "project_name": project_name,
-            "state": state
+            "mr_state": merge_request.get("state","")
         }
         all_code_changes.append(merge_record)
 
@@ -182,19 +243,18 @@ async def get_code_changes(session, project_id):
     events = await make_api_request(session, pulls_url, HEADERS)
     for event in events:
         author = event.get("author", {})
-        p1 = event["push_data"]["commit_from"] or ""
-        p2 = event["push_data"]["commit_to"] or ""
+        p1 = event["push_data"].get("commit_from","")
+        p2 = event["push_data"].get("commit_to","")
         pull_record = {
             "operation": "push",
-            "time": event["created_at"],
-            "author_id": event["author_id"],
-            "author": author.get("username", "Unknown"),
+            "time": event.get("created_at",""),
+            "author_id": event.get("author_id",""),
+            "author": author.get("username", ""),
             "email": "",
-            "message": f"推送了仓库更新, 涉及的提交：{p1},{p2}",
+            "message": f"{p1}:{p2}",
             "sha": "",
             "project_id": project_id,
-            # "project_name": project_name,
-            "state": ""
+            "mr_state": ""
         }
         all_code_changes.append(pull_record)
 
@@ -215,28 +275,29 @@ async def get_mr_notes(session, project_id, mr_iid):
 # 获取审查和合规记录
 async def get_mr_review(session, project_id):
     all_mr_records = []
-    # project_name = await get_project_name(session, project_id)
     
-        # 获取所有MR
     merge_requests_url = time_filters(f"{GITLAB_URL}/projects/{project_id}/merge_requests")
     merge_requests = await make_api_request(session, merge_requests_url, HEADERS)
     
     for merge_request in merge_requests:
+        author = merge_request.get("author",{})
+        assignee = merge_request.get("assignee",{})
+        reviewers_ids = [r["id"] for r in merge_request.get("reviewers", [])]
+        reviewers = ", ".join([r["username"] for r in merge_request.get("reviewers", [])])
         base_mr_record = {
-            "author_id": merge_request["author"]["id"],
-            "author": merge_request["author"]["username"],
-            "mr_title": merge_request["title"],
-            "mr_description": merge_request["description"],
-            "assignee_id": merge_request["assignee"]["id"] if merge_request["assignee"] else None,
-            "assignee": merge_request["assignee"]["username"] if merge_request["assignee"] else None,
-            "reviewers_ids": [r["id"] for r in merge_request.get("reviewers", [])],
-            "reviewers": ", ".join([r["username"] for r in merge_request.get("reviewers", [])]),
+            "author_id": author.get("id",""),
+            "author": author.get("username",""),
+            "mr_title": merge_request.get("title",""),
+            "mr_description": merge_request.get("description",""),
+            "assignee_id": assignee.get("id",""),
+            "assignee": assignee.get("username",""),
+            "reviewers_ids": reviewers_ids,
+            "reviewers": reviewers,
             "project_id": project_id,
-            # "project_name": project_name,
-            "source_branch": merge_request["source_branch"],
-            "target_branch": merge_request["target_branch"],
-            "mr_id": merge_request["iid"],
-            "comments": []  # 初始化评论列表
+            "source_branch": merge_request.get("source_branch",""),
+            "target_branch": merge_request.get("target_branch",""),
+            "mr_id": merge_request.get("iid"),
+            "comments": []
         }
 
         # 根据不同的状态添加记录
@@ -260,9 +321,9 @@ async def get_mr_review(session, project_id):
         notes = await get_mr_notes(session, project_id, merge_request["iid"])
         for note in notes:
             comment = {
-                "commenter": note["commenter"],
-                "content": note["content"],
-                "time": note["time"]
+                "commenter": note.get("commenter",""),
+                "content": note.get("content",""),
+                "time": note.get("time","")
             }
             if all_mr_records:
                 all_mr_records[-1]["comments"].append(comment)
@@ -275,41 +336,37 @@ async def get_cicd_pipelines(session, project_id):
     pipelines = await make_api_request(session, pipelines_url, HEADERS)
     all_pipeline_records = []
     for pipeline in pipelines:
-        pipeline_id = pipeline.get("id", "Unknown ID")
-        # project_name = await get_project_name(session, project_id)
-        branch = pipeline.get("ref", "Unknown Branch")
-        time = pipeline.get("created_at", "Unknown Start Time")  # 使用 created_at 作为 time
-        end_time = pipeline.get("updated_at", "Unknown End Time")
-        duration = pipeline.get("duration", 0)  # 默认值为0
-        triggered_by = pipeline["user"]["username"] if "user" in pipeline else "system"
-        commit_sha = pipeline.get("sha", "Unknown SHA")
+        pipeline_id = pipeline.get("id", "")
+        branch = pipeline.get("ref", "")
+        time = pipeline.get("created_at", "")
+        end_time = pipeline.get("updated_at", "")
+        duration = pipeline.get("duration", 0)
+        triggered_by = pipeline.get("user",{}).get("username","system")
+        commit_sha = pipeline.get("sha", "")
         
         # 获取流水线的所有作业
         jobs_url = f"{GITLAB_URL}/projects/{project_id}/pipelines/{pipeline_id}/jobs"
         jobs = await make_api_request(session, jobs_url, HEADERS)
         for job in jobs:
-            stage_name = job.get("stage", "Unknown Stage")
-            job_name = job.get("name", "Unknown Job Name")
-            job_status = job.get("status", "Unknown Status")
+            job_status = job.get("status", "")
+            job_name = job.get("name", "")
             job_start_time = job.get("started_at", None)
-            job_end_time = job.get("finished_at", "Unknown End Time")
-            job_duration = job.get("duration", 0)  # 默认值为0
-            environment = job.get("environment", {}).get("name", "Unknown Environment")
+            job_end_time = job.get("finished_at", "")
+            job_duration = job.get("duration", 0)
+            environment = job.get("environment", {}).get("name", "")
             
-            # 如果 job_start_time 不存在，使用 pipeline 的 created_at 或者提供默认值
             if not job_start_time:
                 job_start_time = time
                 logging.debug(f"Job {job_name} (ID: {job['id']}) does not have a started_at field. Status: {job_status}")
             
             pipeline_record = {
                 "project_id": project_id,
-                # "project_name": project_name,
                 "branch": branch,
                 "pipeline_id": pipeline_id,
-                "stage_name": stage_name,
-                "job_name": job_name,
-                "job_status": job_status,
-                "time": job_start_time,  # 使用 job_start_time 或者 pipeline 的 created_at
+                "stage": job.get("stage", ""),
+                "job_name": job.get("name", ""),
+                "job_status": job.get("status", ""),
+                "time": job_start_time,
                 "end_time": job_end_time or end_time,
                 "duration": job_duration or duration,
                 "triggered_by": triggered_by,
@@ -322,13 +379,12 @@ async def get_cicd_pipelines(session, project_id):
 
 # 跟踪指定项目中的CI/CD配置变更
 async def track_cicd_config_changes(session, project_id):
-    # project_name = await get_project_name(session, project_id)
     commits_url = f"{GITLAB_URL}/projects/{project_id}/repository/commits"
     commits_url = time_filters(commits_url, 'since', 'until')
     commits = await make_api_request(session, commits_url, HEADERS)
     all_changes = []
     for commit in commits:
-        commit_sha = commit["id"]
+        commit_sha = commit.get("id","")
         
         # 获取当前提交的更改文件列表
         changes_url = f"{GITLAB_URL}/projects/{project_id}/repository/commits/{commit_sha}/diff"
@@ -346,11 +402,10 @@ async def track_cicd_config_changes(session, project_id):
                 change_record = {
                     "change_type": change_type,
                     "change_content": diff,
-                    "time": commit["committed_date"],
-                    "author": commit["author_name"],
+                    "time": commit.get("committed_date",""),
+                    "author": commit.get("author_name",""),
                     "project_id": project_id,
-                    # "project_name": project_name,
-                    "message": commit["message"],
+                    "message": commit.get("message",""),
                     "commit_sha": commit_sha
                 }
                 all_changes.append(change_record)
@@ -370,33 +425,28 @@ async def get_audit_records(session):
             break
         
         for event in audit_events:
-            details = event.get("details", {})
-            operation = None
+            # 确定要检查的键和嵌套键
+            keys = ['event_name']
+            nested_keys = ['details']
+            operation = classify_event_operation(event, keys, nested_keys)
 
-            # 根据存在的键确定operation，并设置event字段
-            if "change" in details:
-                operation = "change"
-            elif "add" in details:
-                operation = "add"
-            elif "remove" in details:
-                operation = "remove"
-            else:
-                operation = ""
+            details = event.get("details", {})
+            pre_post = f"{details.get('from', '')}:{details.get('to', '')}" if "change" in details else ""
 
             record = {
-                "author_id": event.get("author_id", ""),
+                "author_id": event.get("author_id", "-1"),
                 "author": details.get("author_name", ""),
-                "entity_id": event.get("entity_id", ""),
+                "entity_id": event.get("entity_id", "-1"),
                 "entity_type": event.get("entity_type", ""),
-                "time": event["created_at"],
+                "time": event.get("created_at","1970-01-01T00:00:00Z"),
                 "operation": operation,
                 "event": event["event_name"],
-                "target_id": details.get("target_id", ""),
+                "target_id": details.get("target_id", "-1"),
                 "target_type": details.get("target_type", ""),
                 "target_name": details.get("target_details", ""),
-                "per_details": f"{details.get('from', '')}:{details.get('to', '')}" if "change" in details else "",
-                "mem_details": details.get("as", ""),
-                "add_message": details.get("custom_message", ""),
+                "pre_post": pre_post,
+                "last_role": details.get("as", ""),
+                "add_info_": details.get("custom_message", ""),
                 "ip":details.get("ip_address","")
             }
             all_audit_records.append(record)
@@ -406,48 +456,48 @@ async def get_audit_records(session):
     return all_audit_records
 
 # 处理和格式化系统记录
-def process_records(records, event_type, affected_entity):
+def process_records(records, event, entity_type):
     processed_records = []
     for record in records:
-        event_id = record.get("id", "")
-        event_time = record.get("updated_at") or record.get("created_at", "")
-        entity_name = record.get("name", "") or record.get("url", "")
-        feature_flag_version =  record.get("version", "")
-        flag_description = record.get("description", "")
+        event_id = record.get("id") or record.get("strategies",{}).get("id","-1")
+        event_time = record.get("updated_at") or record.get("created_at", "1970-01-01T00:00:00Z")
+        entity_details = record.get("url") or record.get("version", "")
+        hook_events = ', '.join([k for k, v in record.items() if k.endswith('_events') and v])
+        flag_state = "active" if record.get("active") else "inactive" if "active" in record else ""
         processed_records.append({
             "event_id": event_id,
+            "event": event,
+            "entity_type": entity_type,
             "time": event_time,
-            "event_type": event_type,
-            "affected_entity": affected_entity,
-            "entity_name": entity_name,
-            "webhook_events": ', '.join([k for k, v in record.items() if k.endswith('_events') and v]),
-            "feature_flag_version": feature_flag_version,
-            "flag_description": flag_description,
-            "flag_state": "active" if record.get("active") else "inactive" if "active" in record else ""
+            "entity_name": record.get("name", ""),
+            "entity_description": record.get("description", ""),
+            "entity_details": entity_details,
+            "hook_events": hook_events,
+            "flag_state": flag_state
         })
     return processed_records
 
 # 获取通用变更记录  (本地筛选)
-async def get_changes(session, endpoint, event_type, affected_entity):
+async def get_changes(session, endpoint, event, entity_type):
     url = f"{GITLAB_URL}/{endpoint}"
     changes = await make_api_request(session, url, HEADERS)
     if isinstance(changes, dict):  # 如果返回的是单个对象而不是列表，则转换为列表
         changes = [changes]
     filtered_changes = [change for change in changes if is_within_time(change)]
-    return process_records(filtered_changes, event_type, affected_entity)
+    return process_records(filtered_changes, event, entity_type)
 
 # 获取应用设置变更
 async def get_application_settings_changes(session):
-    return await get_changes(session, "application/settings", "setting_change", "application_setting")
+    return await get_changes(session, "application/settings", "update", "ApplicationSetting")
 
 # 获取功能标志变更
 async def get_feature_flag_changes(session, project_id):
     enpoint = f"projects/{project_id}/feature_flags"
-    return await get_changes(session, enpoint, "feature_flag_change", "feature_flag")
+    return await get_changes(session, enpoint, "valid_update", "FeatureFlag")
 
-# 获取Webhooks变更  （系统钩子）
+# 获取系统钩子创建
 async def get_webhooks(session):
-    return await get_changes(session, "hooks", "webhook_change", "webhook")
+    return await get_changes(session, "hooks", "create", "SystemHook")
 
 # 获取所有系统级别变更记录
 async def get_system_level_changes(session, project_ids):
@@ -521,7 +571,7 @@ def generate_audit_directory_name():
     else:
         # 缺省则返回：19700101-当前时间
         current_time_str = end_time.strftime('%Y%m%d')
-        return f'Audit_Output_ALL_19700101-{current_time_str}'
+        return f'Audit_Output_All_19700101-{current_time_str}'
 
 async def main():
     
