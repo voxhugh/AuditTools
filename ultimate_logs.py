@@ -341,7 +341,6 @@ async def get_cicd_pipelines(session, project_id):
         time = pipeline.get("created_at", "")
         end_time = pipeline.get("updated_at", "")
         duration = pipeline.get("duration", 0)
-        triggered_by = pipeline.get("user",{}).get("username","system")
         commit_sha = pipeline.get("sha", "")
         
         # 获取流水线的所有作业
@@ -353,6 +352,7 @@ async def get_cicd_pipelines(session, project_id):
             job_start_time = job.get("started_at", None)
             job_end_time = job.get("finished_at", "")
             job_duration = job.get("duration", 0)
+            triggered_by = job.get("user",{}).get("username","system")
             environment = job.get("environment", {}).get("name", "")
             
             if not job_start_time:
