@@ -630,7 +630,6 @@ async def main():
         try:
             logging.info("Starting the script execution.")
             project_ids = await get_project_ids(session)
-            project_ids = [1102]
             logging.info(f"Retrieved {len(project_ids)} project IDs.")
             await fetch_and_write_records(session, project_ids, get_code_changes, f"{directory_name}/code_changes.csv", 'code_changes')
             await fetch_and_write_records(session, project_ids, get_mr_review, f"{directory_name}/mr_reviews.csv", 'mr_reviews')
