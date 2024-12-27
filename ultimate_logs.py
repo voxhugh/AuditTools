@@ -70,7 +70,11 @@ async def make_api_request(session, url, headers=None):
     try:
         async with session.get(url, headers=headers) as response:
             response.raise_for_status()
-            return await response.json()
+            try:
+                return await response.json()
+            except aiohttp.ContentTypeError:
+                logging.error(f"Failed to parse JSON response from {url}: {await response.text()}")
+                return []
     except aiohttp.ClientError as e:
         logging.error(f"请求失败: {e}")
         return []
@@ -90,7 +94,7 @@ def time_filters(url, since_param='updated_after', until_param='updated_before')
 
 # 记录 - 时间过滤器
 def is_within_time(record):
-    event_time = record.get("updated_at") or record.get("created_at", "")
+    event_time = safe_get(record,"updated_at") or safe_get(record,"created_at",default="")
     if not event_time:
         return True
 
@@ -100,6 +104,20 @@ def is_within_time(record):
     if until_dt and event_datetime > until_dt:
         return False
     return True
+
+# 安全获取字典键值
+def safe_get(dictionary, key, default=""):
+    return dictionary.get(key, default)
+
+# 安全获取链式字典键值
+def safe_chain_get(dictionary, *keys, default=None):
+    result = dictionary
+    for key in keys:
+        if result is None:
+            return default
+        result = result.get(key)
+    return result if result is not None else default
+    
 
 # 获取所有项目的ID
 async def get_project_ids(session):
@@ -113,16 +131,9 @@ async def get_project_ids(session):
         if not projects:
             break
         
-        project_ids.extend([project["id"] for project in projects])
+        project_ids.extend([safe_get(project,"id",default=-1) for project in projects])
         page += 1
-    
     return project_ids
-
-# 获取项目名称
-async def get_project_name(session, project_id):
-    project_url = f"{GITLAB_URL}/projects/{project_id}"
-    project_info = await make_api_request(session, project_url, HEADERS)
-    return project_info.get("name", "")
 
 # 获取文件的内容
 async def get_file_content(session, project_id, commit_sha, file_path):
@@ -130,7 +141,7 @@ async def get_file_content(session, project_id, commit_sha, file_path):
     response = await make_api_request(session, content_url, HEADERS)
     if 'content' in response:
         return base64.b64decode(response['content']).decode('utf-8')
-    return None
+    return ""
 
 # 比较两个版本的yml文件并返回差异
 def compare_yml_files(old_content, new_content):
@@ -200,63 +211,68 @@ def classify_event_operation(event, keys, nested_keys=None):
 # 获取代码变更记录
 async def get_code_changes(session, project_id):
     all_code_changes = []
-    
+
     # 获取提交记录
     commits_url = f"{GITLAB_URL}/projects/{project_id}/repository/commits"
     commits_url = time_filters(commits_url, 'since', 'until')
     commits = await make_api_request(session, commits_url, HEADERS)
-    for commit in commits:
-        commit_record = {
-            "operation": "commit",
-            "time": commit.get("committed_date",""),
-            "author_id": "",
-            "author": commit.get("author_name",""),
-            "email": commit.get("author_email",""),
-            "message": commit.get("message"),
-            "sha": commit.get("id"),
-            "project_id": project_id,
-            "mr_state": ""
-        }
-        all_code_changes.append(commit_record)
+    if commits:
+        for commit in commits:
+            safe_get
+            commit_record = {
+                "operation": "commit",
+                "time": safe_get(commit,"committed_date"),
+                "author_id": "",
+                "author": safe_get(commit,"author_name"),
+                "email": safe_get(commit,"author_email"),
+                "message": safe_get(commit,"message"),
+                "sha": safe_get(commit,"id"),
+                "project_id": project_id,
+                "mr_state": ""
+            }
+            all_code_changes.append(commit_record)
 
     # 获取合并请求记录
     merge_requests_url = time_filters(f"{GITLAB_URL}/projects/{project_id}/merge_requests")
     merge_requests = await make_api_request(session, merge_requests_url, HEADERS)
-    for merge_request in merge_requests:
-        author = merge_request.get("author",{})
-        merge_record = {
-            "operation": "merge_request",
-            "time": merge_request.get("updated_at",""),
-            "author_id": author.get("id",""),
-            "author": author.get("username",""),
-            "email": "",
-            "message": merge_request.get("title"),
-            "sha": "",
-            "project_id": project_id,
-            "mr_state": merge_request.get("state","")
-        }
-        all_code_changes.append(merge_record)
+    if merge_requests:
+        for merge_request in merge_requests:
+            author_id = safe_chain_get(merge_request,"author","id",default=-1)
+            author = safe_chain_get(merge_request,"author","username",default="")
+            merge_record = {
+                "operation": "merge_request",
+                "time": safe_get(merge_request,"updated_at"),
+                "author_id": author_id,
+                "author": author,
+                "email": "",
+                "message": safe_get(merge_request,"title"),
+                "sha": "",
+                "project_id": project_id,
+                "mr_state": safe_get(merge_request,"state")
+            }
+            all_code_changes.append(merge_record)
 
     # 获取推送记录
     pulls_url = f"{GITLAB_URL}/projects/{project_id}/events?action=pushed"
     pulls_url = time_filters(pulls_url, 'after', 'before')
     events = await make_api_request(session, pulls_url, HEADERS)
-    for event in events:
-        author = event.get("author", {})
-        p1 = event["push_data"].get("commit_from","")
-        p2 = event["push_data"].get("commit_to","")
-        pull_record = {
-            "operation": "push",
-            "time": event.get("created_at",""),
-            "author_id": event.get("author_id",""),
-            "author": author.get("username", ""),
-            "email": "",
-            "message": f"{p1}:{p2}",
-            "sha": "",
-            "project_id": project_id,
-            "mr_state": ""
-        }
-        all_code_changes.append(pull_record)
+    if events:
+        for event in events:
+            author = safe_chain_get(event,"author","username",default="")
+            p1 = safe_chain_get(event,"push_data","commit_from",default="")
+            p2 = safe_chain_get(event,"push_data","commit_to",default="")
+            pull_record = {
+                "operation": "push",
+                "time": safe_get(event,"created_at"),
+                "author_id": safe_get(event,"author_id"),
+                "author": author,
+                "email": "",
+                "message": f"{p1}:{p2}",
+                "sha": "",
+                "project_id": project_id,
+                "mr_state": ""
+            }
+            all_code_changes.append(pull_record)
 
     return all_code_changes
 
@@ -266,9 +282,9 @@ async def get_mr_notes(session, project_id, mr_iid):
     notes = await make_api_request(session, notes_url, HEADERS)
     return [
         {
-            "commenter": note["author"]["username"],
-            "content": note["body"],
-            "time": note["created_at"]
+            "commenter":  safe_chain_get(note,"author","username",default=""),
+            "content": safe_get(note,"body"),
+            "time": safe_get(note,"created_at")
         } for note in notes
     ]
 
@@ -279,24 +295,29 @@ async def get_mr_review(session, project_id):
     merge_requests_url = time_filters(f"{GITLAB_URL}/projects/{project_id}/merge_requests")
     merge_requests = await make_api_request(session, merge_requests_url, HEADERS)
     
+    if not merge_requests:
+        return all_mr_records
     for merge_request in merge_requests:
-        author = merge_request.get("author",{})
-        assignee = merge_request.get("assignee",{})
-        reviewers_ids = [r["id"] for r in merge_request.get("reviewers", [])]
-        reviewers = ", ".join([r["username"] for r in merge_request.get("reviewers", [])])
+        author_id = safe_chain_get(merge_request,"author","id",default=-1)
+        author = safe_chain_get(merge_request,"author","username",default="")
+        assignee_id = safe_chain_get(merge_request,"assignee","id",default=-1)
+        assignee = safe_chain_get(merge_request,"assignee","username",default="")
+        reviewers_ids = [r["id"] for r in safe_get(merge_request,"reviewers",default=[])]
+        reviewers = ", ".join([r["username"] for r in safe_get(merge_request,"reviewers",default=[])])
+        mr_id = safe_get(merge_request,"iid")
         base_mr_record = {
-            "author_id": author.get("id",""),
-            "author": author.get("username",""),
-            "mr_title": merge_request.get("title",""),
-            "mr_description": merge_request.get("description",""),
-            "assignee_id": assignee.get("id",""),
-            "assignee": assignee.get("username",""),
+            "author_id": author_id,
+            "author": author,
+            "mr_title": safe_get(merge_request,"title"),
+            "mr_description": safe_get(merge_request,"description"),
+            "assignee_id": assignee_id,
+            "assignee": assignee,
             "reviewers_ids": reviewers_ids,
             "reviewers": reviewers,
             "project_id": project_id,
-            "source_branch": merge_request.get("source_branch",""),
-            "target_branch": merge_request.get("target_branch",""),
-            "mr_id": merge_request.get("iid"),
+            "source_branch": safe_get(merge_request,"source_branch"),
+            "target_branch": safe_get(merge_request,"target_branch"),
+            "mr_id": mr_id,
             "comments": []
         }
 
@@ -309,7 +330,7 @@ async def get_mr_review(session, project_id):
         ]
         
         for key, value in status_updates:
-            if merge_request.get(key):
+            if safe_get(merge_request,"key",default=None):
                 record = base_mr_record.copy()
                 record.update({
                     "time": merge_request[key],
@@ -318,12 +339,12 @@ async def get_mr_review(session, project_id):
                 all_mr_records.append(record)
 
         # 获取MR的注释
-        notes = await get_mr_notes(session, project_id, merge_request["iid"])
+        notes = await get_mr_notes(session, project_id, mr_id)
         for note in notes:
             comment = {
-                "commenter": note.get("commenter",""),
-                "content": note.get("content",""),
-                "time": note.get("time","")
+                "commenter": safe_get(note,"commenter"),
+                "content": safe_get(note,"content"),
+                "time": safe_get(note,"time")
             }
             if all_mr_records:
                 all_mr_records[-1]["comments"].append(comment)
@@ -335,37 +356,38 @@ async def get_cicd_pipelines(session, project_id):
     pipelines_url = time_filters(f"{GITLAB_URL}/projects/{project_id}/pipelines")
     pipelines = await make_api_request(session, pipelines_url, HEADERS)
     all_pipeline_records = []
+    if not pipelines:
+        return all_pipeline_records
     for pipeline in pipelines:
-        pipeline_id = pipeline.get("id", "")
-        branch = pipeline.get("ref", "")
-        time = pipeline.get("created_at", "")
-        end_time = pipeline.get("updated_at", "")
-        duration = pipeline.get("duration", 0)
-        commit_sha = pipeline.get("sha", "")
+        pipeline_id = safe_get(pipeline,"id")
+        branch = safe_get(pipeline,"ref")
+        time = safe_get(pipeline,"created_at")
+        end_time =  safe_get(pipeline,"updated_at")
+        duration = safe_get(pipeline,"duration",default=0)
+        commit_sha = safe_get(pipeline,"sha")
         
         # 获取流水线的所有作业
         jobs_url = f"{GITLAB_URL}/projects/{project_id}/pipelines/{pipeline_id}/jobs"
         jobs = await make_api_request(session, jobs_url, HEADERS)
+        if not jobs:
+            continue
         for job in jobs:
-            job_status = job.get("status", "")
-            job_name = job.get("name", "")
-            job_start_time = job.get("started_at", None)
-            job_end_time = job.get("finished_at", "")
-            job_duration = job.get("duration", 0)
-            triggered_by = job.get("user",{}).get("username","system")
-            environment = job.get("environment", {}).get("name", "")
+            job_start_time = safe_get(job,"started_at",default=None)
+            job_end_time = safe_get(job,"finished_at")
+            job_duration = safe_get(job,"duration",default=0)
+            triggered_by = safe_chain_get(job,"user","username",default="system")
+            environment = safe_chain_get(job,"environment","name",default="")
             
             if not job_start_time:
                 job_start_time = time
-                logging.debug(f"Job {job_name} (ID: {job['id']}) does not have a started_at field. Status: {job_status}")
             
             pipeline_record = {
                 "project_id": project_id,
                 "branch": branch,
                 "pipeline_id": pipeline_id,
-                "stage": job.get("stage", ""),
-                "job_name": job.get("name", ""),
-                "job_status": job.get("status", ""),
+                "stage": safe_get(job,"stage"),
+                "job_name": safe_get(job,"name"),
+                "job_status": safe_get(job,"status"),
                 "time": job_start_time,
                 "end_time": job_end_time or end_time,
                 "duration": job_duration or duration,
@@ -383,17 +405,23 @@ async def track_cicd_config_changes(session, project_id):
     commits_url = time_filters(commits_url, 'since', 'until')
     commits = await make_api_request(session, commits_url, HEADERS)
     all_changes = []
+    if not commits:
+        return all_changes
     for commit in commits:
-        commit_sha = commit.get("id","")
+        commit_sha = safe_get(commit,"id")
         
         # 获取当前提交的更改文件列表
         changes_url = f"{GITLAB_URL}/projects/{project_id}/repository/commits/{commit_sha}/diff"
         changes = await make_api_request(session, changes_url, HEADERS)
+        if not changes:
+            continue
         for change in changes:
             if change['new_path'] == '.gitlab-ci.yml':
+
                 # 获取新旧内容
-                old_content = await get_file_content(session, project_id, commit["parent_ids"][0], change['old_path']) if commit["parent_ids"] else None
-                new_content = await get_file_content(session, project_id, commit_sha, change['new_path'])
+                old_content = (await get_file_content(session, project_id, commit["parent_ids"][0], 
+                                                     safe_get(change,"old_path"))) if "parent_ids" in commit and commit["parent_ids"] else ""
+                new_content = await get_file_content(session, project_id, commit_sha, safe_get(change,"new_path"))
                 
                 # 比较文件内容
                 change_type, diff = compare_yml_files(old_content, new_content)
@@ -402,10 +430,10 @@ async def track_cicd_config_changes(session, project_id):
                 change_record = {
                     "change_type": change_type,
                     "change_content": diff,
-                    "time": commit.get("committed_date",""),
-                    "author": commit.get("author_name",""),
+                    "time": safe_get(commit,"committed_date"),
+                    "author": safe_get(commit,"author_name"),
                     "project_id": project_id,
-                    "message": commit.get("message",""),
+                    "message": safe_get(commit,"message"),
                     "commit_sha": commit_sha
                 }
                 all_changes.append(change_record)
@@ -418,59 +446,76 @@ async def get_audit_records(session):
     base_url = f"{GITLAB_URL}/audit_events"
     base_url = time_filters(base_url, 'created_after', 'created_before')
     page = 1
+    logging.info("Fetching audit records, page 1...")
     while True:
         events_url = f"{base_url}{'&' if '?' in base_url else '?'}page={page}&per_page={PER_PAGE}"
         audit_events = await make_api_request(session, events_url, HEADERS)
         if not audit_events or isinstance(audit_events, dict):
             break
-        
         for event in audit_events:
             # 确定要检查的键和嵌套键
             keys = ['event_name']
             nested_keys = ['details']
             operation = classify_event_operation(event, keys, nested_keys)
-
-            details = event.get("details", {})
-            pre_post = f"{details.get('from', '')}:{details.get('to', '')}" if "change" in details else ""
-
+            author = safe_chain_get(event,"details","author_name",default="")
+            target_id = safe_chain_get(event,"details","target_id",default=-1)
+            target_type = safe_chain_get(event,"details","target_type",default="")
+            target_name = safe_chain_get(event,"details","target_details",default="")
+            last_role = safe_chain_get(event,"details","as",default="")
+            add_info_ = safe_chain_get(event,"details","custom_message",default="")
+            ip = safe_chain_get(event,"details","ip_address",default="")
+            change = safe_chain_get(event,"details","change",default=None)
+            if change is not None:
+                from_ = safe_chain_get(event,"details","from",default="")
+                to_ = safe_chain_get(event,"details","to",default="")
+                pre_post = f"{from_}:{to_}"
+            else:
+                pre_post = ""
             record = {
-                "author_id": event.get("author_id", "-1"),
-                "author": details.get("author_name", ""),
-                "entity_id": event.get("entity_id", "-1"),
-                "entity_type": event.get("entity_type", ""),
-                "time": event.get("created_at","1970-01-01T00:00:00Z"),
+                "author_id": safe_get(event,"author_id",default=-1),
+                "author": author,
+                "entity_id": safe_get(event,"entity_id",default=-1),
+                "entity_type": safe_get(event,"entity_type"),
+                "time": safe_get(event,"created_at",default="1970-01-01T00:00:00Z"),
                 "operation": operation,
-                "event": event["event_name"],
-                "target_id": details.get("target_id", "-1"),
-                "target_type": details.get("target_type", ""),
-                "target_name": details.get("target_details", ""),
+                "event": safe_get(event,"event_name"),
+                "target_id": target_id,
+                "target_type": target_type,
+                "target_name": target_name,
                 "pre_post": pre_post,
-                "last_role": details.get("as", ""),
-                "add_info_": details.get("custom_message", ""),
-                "ip":details.get("ip_address","")
+                "last_role": last_role,
+                "add_info_": add_info_,
+                "ip": ip
             }
             all_audit_records.append(record)
-        
         page += 1
-    
+        logging.info(f"Fetching audit records, page {page}...")
     return all_audit_records
 
 # 处理和格式化系统记录
 def process_records(records, event, entity_type):
     processed_records = []
     for record in records:
-        event_id = record.get("id") or record.get("strategies",{}).get("id","-1")
-        event_time = record.get("updated_at") or record.get("created_at", "1970-01-01T00:00:00Z")
-        entity_details = record.get("url") or record.get("version", "")
+        event_id = safe_get(record,"id",default=None)
+        if not event_id:
+            try:
+                usr_id = record["strategies"][0].get("id",-1)
+                event_id = usr_id
+            except (KeyError, IndexError):
+                event_id = -1
+
+        event_time = safe_get(record,"updated_at",default=None) or safe_get(record,"created_at",default="1970-01-01T00:00:00Z")
+        entity_details = safe_get(record,"url",default=None) or safe_get(record,"version")
         hook_events = ', '.join([k for k, v in record.items() if k.endswith('_events') and v])
-        flag_state = "active" if record.get("active") else "inactive" if "active" in record else ""
+        safe_get(record,"active",default=None)
+        flag_state = "active" if safe_get(record,"active") else "inactive" if safe_get(record,"active") else ""
         processed_records.append({
             "event_id": event_id,
             "event": event,
             "entity_type": entity_type,
             "time": event_time,
-            "entity_name": record.get("name", ""),
-            "entity_description": record.get("description", ""),
+            "entity_name": safe_get(record,"name"),
+            "entity_description": safe_get(record,"description"),
             "entity_details": entity_details,
             "hook_events": hook_events,
             "flag_state": flag_state
@@ -501,22 +546,21 @@ async def get_webhooks(session):
 
 # 获取所有系统级别变更记录
 async def get_system_level_changes(session, project_ids):
-    # 创建并发任务列表
-    tasks = [
-        get_application_settings_changes(session),
-        get_webhooks(session),
-        *[get_feature_flag_changes(session, project_id) for project_id in project_ids]  # 为每个项目创建获取功能标志变更的任务
-    ]
-    # 收集所有结果，合并记录
+    tasks = []
+    logging.info("Fetching application settings changes...")
+    tasks.append(get_application_settings_changes(session))
+    logging.info("Fetching webhooks...")
+    tasks.append(get_webhooks(session))
+    logging.info("Fetching feature flag changes...")
+    for project_id in project_ids:
+        tasks.append(get_feature_flag_changes(session, project_id))
     results = await asyncio.gather(*tasks, return_exceptions=True)
-
     all_records = []
     for result in results:
         if isinstance(result, Exception):
             logging.error(f"Error fetching system level changes: {result}")
         else:
             all_records.extend(result)
-    
     return all_records
 
 # 将记录按时间升序追加到CSV文件
@@ -538,10 +582,15 @@ def write_to_csv(records, filename, fieldnames, sort_key="time"):
 
 # 并发获取记录并写入CSV文件
 async def fetch_and_write_records(session, project_ids, fetch_func, filename, fieldnames_key, sort_key="time"):
+    logging.info(f"Fetching {fieldnames_key} records...")
     tasks = [fetch_func(session, project_id) for project_id in project_ids]
-    records_lists = await asyncio.gather(*tasks, return_exceptions=True)
-    all_records = [item for sublist in records_lists for item in sublist]
-
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    all_records = []
+    for result in results:
+        if isinstance(result, Exception):
+            logging.error(f"Error fetching {fieldnames_key} records: {result}")
+        else:
+            all_records.extend(result)
     write_to_csv(all_records, filename, FIELDNAMES[fieldnames_key], sort_key)
 
 # 动态生成目标目录
@@ -574,29 +623,23 @@ def generate_audit_directory_name():
         return f'Audit_Output_All_19700101-{current_time_str}'
 
 async def main():
-    
-    directory_name = generate_audit_directory_name()        # 生成目录
+    directory_name = generate_audit_directory_name()
     if not os.path.exists(directory_name):
         os.makedirs(directory_name)
-
     async with aiohttp.ClientSession() as session:
         try:
             logging.info("Starting the script execution.")
-
-            project_ids = await get_project_ids(session)        # 获取项目id & 初筛
+            project_ids = await get_project_ids(session)
+            project_ids = [1102]
             logging.info(f"Retrieved {len(project_ids)} project IDs.")
-
             await fetch_and_write_records(session, project_ids, get_code_changes, f"{directory_name}/code_changes.csv", 'code_changes')
             await fetch_and_write_records(session, project_ids, get_mr_review, f"{directory_name}/mr_reviews.csv", 'mr_reviews')
             await fetch_and_write_records(session, project_ids, get_cicd_pipelines, f"{directory_name}/cicd_pipelines.csv", 'cicd_pipelines')
             await fetch_and_write_records(session, project_ids, track_cicd_config_changes, f"{directory_name}/cicd_changes.csv", 'cicd_changes')
-
             audit_records = await get_audit_records(session)
             write_to_csv(audit_records, f"{directory_name}/audit_records.csv", FIELDNAMES['audit_records'])
-
             system_level_changes = await get_system_level_changes(session, project_ids)
             write_to_csv(system_level_changes, f"{directory_name}/all_system_changes.csv", FIELDNAMES['all_system_changes'])
-
             logging.info("Script execution completed successfully.")
         except Exception as e:
             logging.error(f"An error occurred during the execution of main: {e}")
