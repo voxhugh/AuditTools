@@ -330,7 +330,7 @@ async def get_mr_review(session, project_id):
         ]
         
         for key, value in status_updates:
-            if safe_get(merge_request,"key",default=None):
+            if safe_get(merge_request,key,default=None):
                 record = base_mr_record.copy()
                 record.update({
                     "time": merge_request[key],
