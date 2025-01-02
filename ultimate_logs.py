@@ -54,6 +54,12 @@ FIELDNAMES = {
             "entity_details", "hook_events", "flag_state"]
 }
 
+DIMFIELDS = {
+    'Users': ["id", "username", "email", "state", "is_admin", "created_at", "last_sign_in_at", "last_activity_on"],
+    'Projects': ["id", "name", "description", "tag_list", "metadata"],
+    'Groups': ["id", "name", "description", "members", "visibility", "created_at", "path"]
+}
+
 # 预编译关键词到操作性质的映射
 operation_patterns = {
     "create": [re.compile(r"\b(add|created|added|new|inserted|registered|generate)\b", re.IGNORECASE),
@@ -563,6 +569,90 @@ async def get_system_level_changes(session, project_ids):
             all_records.extend(result)
     return all_records
 
+# 用户维度
+async def acquire_users(session):
+    all_users_info = []
+    base_url = f"{GITLAB_URL}/users?order_by=updated_at"
+    page = 1
+    logging.info("Acquiring Users Info, page 1...")
+    while True:
+        usr_url = f"{base_url}&page={page}&per_page={PER_PAGE}"
+        users_info = await make_api_request(session, usr_url, HEADERS)
+        if not users_info or isinstance(users_info, dict):
+            break
+        for usr in users_info:
+            record = {
+                "id": safe_get(usr,"id",default=-1),
+                "username": safe_get(usr,"username"),
+                "email": safe_get(usr,"email"),
+                "state": safe_get(usr,"state"),
+                "is_admin": safe_get(usr,"is_admin"),
+                "created_at": safe_get(usr,"created_at"),
+                "last_sign_in_at": safe_get(usr,"current_sign_in_at"),
+                "last_activity_on": safe_get(usr,"last_activity_on")
+            }
+            all_users_info.append(record)
+        page += 1
+        logging.info(f"Acquiring Users Info, page {page}...")
+    return all_users_info
+
+# 项目维度
+async def acquire_projects(session, project_ids):
+    all_projects = []
+    project_ids_set = set(project_ids)
+    proj_url = f"{GITLAB_URL}/projects?simple=true"
+    logging.info("Acquiring Projects Info...")
+    projects = await make_api_request(session, proj_url, HEADERS)
+    if projects:
+        for proj in projects:
+            proj_id = safe_get(proj, "id")
+            if proj_id and proj_id in project_ids_set:
+                record = {
+                    "id": proj_id,
+                    "name": safe_get(proj, "name"),
+                    "description": safe_get(proj, "description"),
+                    "tag_list": safe_get(proj, "tag_list"),
+                    "metadata": proj
+                }
+                all_projects.append(record)
+    return all_projects
+
+# 组维度
+async def acquire_groups(session):
+    all_groups = []
+    base_url = f"{GITLAB_URL}/groups"
+    page = 1
+    logging.info("Acquiring Groups Info, page 1...")
+    while True:
+        group_url = f"{base_url}?page={page}&per_page={PER_PAGE}"
+        groups_info = await make_api_request(session, group_url, HEADERS)
+        if not groups_info or isinstance(groups_info, dict):
+            break
+        for grp in groups_info:
+            record = {
+                "id": safe_get(grp, "id", default=-1),
+                "name": safe_get(grp, "name"),
+                "description": safe_get(grp, "description"),
+                "members": [],
+                "visibility": safe_get(grp, "visibility"),
+                "created_at": safe_get(grp, "created_at"),
+                "path": safe_get(grp, "path")
+            }
+            # 获取组内成员
+            group_id = record["id"]
+            if group_id!= -1:
+                mem_url = f"{base_url}/{group_id}/members"
+                members_info = await make_api_request(session, mem_url, HEADERS)
+                if members_info:
+                    for member in members_info:
+                        member_id = safe_get(member, "id")
+                        if member_id:
+                            record["members"].append(member_id)
+            all_groups.append(record)
+        page += 1
+        logging.info(f"Acquiring Groups Info, page {page}...")
+    return all_groups
+
 # 将记录按时间升序追加到CSV文件
 def write_to_csv(records, filename, fieldnames, sort_key="time"):
     if sort_key:
@@ -639,6 +729,12 @@ async def main():
             write_to_csv(audit_records, f"{directory_name}/audit_records.csv", FIELDNAMES['audit_records'])
             system_level_changes = await get_system_level_changes(session, project_ids)
             write_to_csv(system_level_changes, f"{directory_name}/all_system_changes.csv", FIELDNAMES['all_system_changes'])
+            dim_users = await acquire_users(session)
+            write_to_csv(dim_users,f"{directory_name}/dim_users.csv",DIMFIELDS['Users'],sort_key='id')
+            dim_projects = await acquire_projects(session,project_ids)
+            write_to_csv(dim_projects,f"{directory_name}/dim_projects.csv",DIMFIELDS['Projects'],sort_key='id')
+            dim_groups = await acquire_groups(session)
+            write_to_csv(dim_groups,f"{directory_name}/dim_groups.csv",DIMFIELDS['Groups'],sort_key='id')
             logging.info("Script execution completed successfully.")
         except Exception as e:
             logging.error(f"An error occurred during the execution of main: {e}")
