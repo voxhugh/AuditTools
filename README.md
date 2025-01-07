@@ -16,10 +16,10 @@ Including but not limited to:
 
 ### explain
 
-`ultimate_logs.py`
+`Audit.py`
 
 - Acquire all changes from api
 
-`native_logs.py`
+`Systlog.py`
 
 - Get the log in the gitlab file system

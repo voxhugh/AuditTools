@@ -273,8 +273,8 @@ async def get_code_changes(session, project_id):
                 "author_id": safe_get(event,"author_id"),
                 "author": author,
                 "email": "",
-                "message": f"{p1}:{p2}",
-                "sha": "",
+                "message": f"commit from:{p1}",
+                "sha": p2,
                 "project_id": project_id,
                 "mr_state": ""
             }
