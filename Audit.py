@@ -55,7 +55,7 @@ FIELDNAMES = {
 }
 
 DIMFIELDS = {
-    'Users': ["id", "username", "email", "state", "is_admin", "created_at", "last_sign_in_at", "last_activity_on"],
+    'Users': ["id", "username", "nickname", "email", "state", "is_admin", "created_at", "last_sign_in_at", "last_activity_on"],
     'Projects': ["id", "name", "description", "tag_list", "metadata"],
     'Groups': ["id", "name", "description", "members", "visibility", "created_at", "path"]
 }
@@ -584,6 +584,7 @@ async def acquire_users(session):
             record = {
                 "id": safe_get(usr,"id",default=-1),
                 "username": safe_get(usr,"username"),
+                "nickname": safe_get(usr,"name"),
                 "email": safe_get(usr,"email"),
                 "state": safe_get(usr,"state"),
                 "is_admin": safe_get(usr,"is_admin"),

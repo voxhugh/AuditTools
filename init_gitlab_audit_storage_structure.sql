@@ -7,6 +7,7 @@ USE dev;
 CREATE TABLE dim_users_info (
     user_id INT NOT NULL COMMENT '用户唯一标识',
     user_name VARCHAR(255) NOT NULL COMMENT '用户名或真实姓名',
+    nickname VARCHAR(255) COMMENT '昵称',
     email VARCHAR(255) COMMENT '用户邮箱',
     user_status VARCHAR(20) COMMENT '用户状态，如 active 等',
     user_tags ARRAY<STRING> COMMENT '用户标签，如角色等',

@@ -23,6 +23,7 @@ DATA_SOURCE_CONFIG = {
             "field_mappings": {
                 "user_id": "id",
                 "user_name": "username",
+                "nickname": "nickname",
                 "email": "email",
                 "user_status": "state",
                 "user_tags": lambda row: ["Admin"] if safe_get(row,'is_admin') == 'True' else ["User"],
