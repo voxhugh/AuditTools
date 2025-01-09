@@ -229,8 +229,8 @@ async def get_code_changes(session, project_id):
                 "operation": "commit",
                 "time": safe_get(commit,"committed_date"),
                 "author_id": "",
-                "author": safe_get(commit,"author_name"),
-                "email": safe_get(commit,"author_email"),
+                "author": safe_get(commit,"committer_name"),
+                "email": safe_get(commit,"committer_email"),
                 "message": safe_get(commit,"message"),
                 "sha": safe_get(commit,"id"),
                 "project_id": project_id,
@@ -244,7 +244,7 @@ async def get_code_changes(session, project_id):
     if merge_requests:
         for merge_request in merge_requests:
             author_id = safe_chain_get(merge_request,"author","id",default=-1)
-            author = safe_chain_get(merge_request,"author","username",default="")
+            author = safe_chain_get(merge_request,"author","name",default="")
             merge_record = {
                 "operation": "merge_request",
                 "time": safe_get(merge_request,"updated_at"),
@@ -264,7 +264,7 @@ async def get_code_changes(session, project_id):
     events = await make_api_request(session, pulls_url, HEADERS)
     if events:
         for event in events:
-            author = safe_chain_get(event,"author","username",default="")
+            author = safe_chain_get(event,"author","name",default="")
             p1 = safe_chain_get(event,"push_data","commit_from",default="")
             p2 = safe_chain_get(event,"push_data","commit_to",default="")
             pull_record = {
