@@ -42,7 +42,7 @@ DATA_SOURCE_CONFIG = {
                 "project_name": "name",
                 "project_desc": "description",
                 "project_tags": "tag_list",
-                "project_metadata": "metadata"
+                "project_metadata": lambda row: extract_from_json_str(safe_get(row, 'metadata'))
             }
         }
     ],
@@ -202,8 +202,39 @@ DATA_SOURCE_CONFIG = {
     ]
 }
 
+METADATA_MAP = {
+    'path': 'path_with_namespace',
+    'create_time': 'created_at',
+    'main_branch': 'default_branch',
+    'last_activity_time': 'last_activity_at',
+    'forks': 'forks_count',
+    'stars':'star_count'
+}
+
 def safe_get(dictionary, key, default=""):
     return dictionary.get(key, default)
+
+def fix_json_str(metadata_str: str) -> str:
+    fixed_str = metadata_str.replace("'", '"').replace('None', 'null')
+    return fixed_str
+
+def extract_from_json_str(metadata_str: str) -> Dict[str, Any]:
+    if not isinstance(metadata_str, str) or not metadata_str.strip():
+        print("Warning: Metadata field is empty or not a valid string.")
+        return {}
+    try:
+        metadata_str_fixed = fix_json_str(metadata_str)
+        metadata_dict = json.loads(metadata_str_fixed)
+        filtered_metadata = {key: metadata_dict.get(METADATA_MAP[key]) if METADATA_MAP[key] in metadata_dict else None
+                             for key in METADATA_MAP}
+        return {k: v for k, v in filtered_metadata.items() if v is not None}
+    except json.JSONDecodeError as e:
+        print(f"Warning: Invalid JSON format in metadata field - {e}")
+        print(f"Problematic metadata string: {metadata_str[:50]}...")
+        return {}
+    except Exception as e:
+        print(f"Unexpected error processing metadata field: {e}")
+        return {}
 
 def convert_value(value):
     if isinstance(value, list):
