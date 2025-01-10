@@ -224,7 +224,6 @@ async def get_code_changes(session, project_id):
     commits = await make_api_request(session, commits_url, HEADERS)
     if commits:
         for commit in commits:
-            safe_get
             commit_record = {
                 "operation": "commit",
                 "time": safe_get(commit,"committed_date"),
