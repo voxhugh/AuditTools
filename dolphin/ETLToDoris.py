@@ -223,13 +223,12 @@ def process_system_change_records(records: List[Dict], event_type: str, entity_t
     return processed_records
 
 # ----------------------- Fetch Functions -----------------------
-async def fetch_users(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
-    users = []
-    endpoint = "users"
+async def fetch_users(client: httpx.AsyncClient) -> None:
     page = 1
+    batch = []
     logging.info("Acquiring Users Info, page 1...")
     while True:
-        url = f"{GITLAB_URL}/{endpoint}?order_by=updated_at&page={page}&per_page={PER_PAGE}"
+        url = f"{GITLAB_URL}/users?order_by=updated_at&page={page}&per_page={PER_PAGE}"
         try:
             response = await make_api_request(client, url, HEADERS)
             if not response or isinstance(response, dict):
@@ -248,15 +247,19 @@ async def fetch_users(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
                         "last_activity_date": safe_get(user, "last_activity_on")
                     })
                 }
-                users.append(user_info)
+                batch.append(user_info)
+                if len(batch) >= BATCH_SIZE:
+                    await process_and_insert_data({"dim_users_info": batch})
+                    batch = []
             page += 1
             logging.info(f"Acquiring Users Info, page {page}...")
         except Exception as e:
             logging.error(f"Error fetching users from {url}: {e}")
-    return users
+    if batch:
+        await process_and_insert_data({"dim_users_info": batch})
 
-async def fetch_projects(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
-    projects = []
+async def fetch_projects(client: httpx.AsyncClient) -> None:
+    batch = []
     endpoint = "projects"
     proj_url = f"{GITLAB_URL}/{endpoint}?simple=true"
     logging.info("Acquiring Projects Info...")
@@ -270,19 +273,21 @@ async def fetch_projects(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
                     "project_name": safe_get(proj, "name"),
                     "project_desc": safe_get(proj, "description"),
                     "project_tags": safe_get(proj, "tag_list"),
-                    "project_metadata": json.dumps(extract_from_json_str(safe_get(proj, 'metadata')))
+                    "project_metadata": json.dumps(extract_from_json_str(safe_get(proj,'metadata')))
                 }
-                projects.append(project_info)
+                batch.append(project_info)
+                if len(batch) >= BATCH_SIZE:
+                    await process_and_insert_data({"dim_projects_info": batch})
+                    batch = []
+    if batch:
+        await process_and_insert_data({"dim_projects_info": batch})
 
-    return projects
-
-async def fetch_groups(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
-    groups = []
-    group_endpoint = "groups"
+async def fetch_groups(client: httpx.AsyncClient) -> None:
     page = 1
+    batch = []
     logging.info("Acquiring Groups Info, page 1...")
     while True:
-        url = f"{GITLAB_URL}/{group_endpoint}?page={page}&per_page={PER_PAGE}"
+        url = f"{GITLAB_URL}/groups?page={page}&per_page={PER_PAGE}"
         try:
             response = await make_api_request(client, url, HEADERS)
             if not response or isinstance(response, dict):
@@ -307,12 +312,16 @@ async def fetch_groups(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
                         "path": safe_get(group, "path")
                     })
                 }
-                groups.append(group_info)
+                batch.append(group_info)
+                if len(batch) >= BATCH_SIZE:
+                    await process_and_insert_data({"dim_groups_info": batch})
+                    batch = []
             page += 1
             logging.info(f"Acquiring Groups Info, page {page}...")
         except Exception as e:
             logging.error(f"Error fetching groups: {e}")
-    return groups
+    if batch:
+        await process_and_insert_data({"dim_groups_info": batch})
 
 async def fetch_code_changes(client: httpx.AsyncClient, project_id: int) -> List[Dict[str, Any]]:
     all_code_changes = []
@@ -528,18 +537,16 @@ async def track_cicd_config_changes(client: httpx.AsyncClient, project_id: int) 
         logging.error(f"Error tracking CICD config changes for project {project_id}: {e}")
     return config_changes
 
-async def fetch_audit_records(client: httpx.AsyncClient) -> Dict[str, List[Dict[str, Any]]]:
-    all_audit_records = {
-        "fact_user_operations_records": [],
-        "fact_project_group_changes_records": []
-    }
+async def fetch_audit_records(client: httpx.AsyncClient) -> None:
     audit_events_endpoint = "audit_events"
     base_url = time_filters(f"{GITLAB_URL}/{audit_events_endpoint}", 'created_after', 'created_before')
-    try:
-        page = 1
-        logging.info("Fetching audit records, page 1...")
-        while True:
-            events_url = f"{base_url}{'&' if '?' in base_url else '?'}page={page}&per_page={PER_PAGE}"
+    page = 1
+    user_batch = []
+    project_group_batch = []
+    logging.info("Fetching audit records, page 1...")
+    while True:
+        events_url = f"{base_url}{'&' if '?' in base_url else '?'}page={page}&per_page={PER_PAGE}"
+        try:
             audit_events = await make_api_request(client, events_url, HEADERS)
             if not audit_events or isinstance(audit_events, dict):
                 break
@@ -577,7 +584,7 @@ async def fetch_audit_records(client: httpx.AsyncClient) -> Dict[str, List[Dict[
                             "ip": common_fields['ip']
                         })
                     }
-                    all_audit_records["fact_user_operations_records"].append(user_record)
+                    user_batch.append(user_record)
                 elif entity_type in ['Project', 'Group']:
                     project_group_record = {
                         "change_id": str(uuid.uuid4()),
@@ -598,12 +605,21 @@ async def fetch_audit_records(client: httpx.AsyncClient) -> Dict[str, List[Dict[
                             "ip": common_fields['ip']
                         })
                     }
-                    all_audit_records["fact_project_group_changes_records"].append(project_group_record)
+                    project_group_batch.append(project_group_record)
+                if len(user_batch) >= BATCH_SIZE:
+                    await process_and_insert_data({"fact_user_operations_records": user_batch})
+                    user_batch = []
+                if len(project_group_batch) >= BATCH_SIZE:
+                    await process_and_insert_data({"fact_project_group_changes_records": project_group_batch})
+                    project_group_batch = []
             page += 1
             logging.info(f"Fetching audit records, page {page}...")
-    except Exception as e:
-        logging.error(f"Error fetching audit records: {e}")
-    return all_audit_records
+        except Exception as e:
+            logging.error(f"Error fetching audit records: {e}")
+    if user_batch:
+        await process_and_insert_data({"fact_user_operations_records": user_batch})
+    if project_group_batch:
+        await process_and_insert_data({"fact_project_group_changes_records": project_group_batch})
 
 async def fetch_system_changes(
     client: httpx.AsyncClient,
@@ -689,53 +705,65 @@ async def acquire_groups(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
         logging.error(f"Error acquiring groups: {e}")
         return []
 
-async def acquire_code_changes(client: httpx.AsyncClient, project_ids: List[int]) -> List[Dict[str, Any]]:
-    all_code_changes = []
-    try:
-        logging.info("Fetching code changes...")
-        for project_id in project_ids:
+async def acquire_code_changes(client: httpx.AsyncClient, project_ids: List[int]) -> None:
+    batch = []
+    logging.info("Fetching code changes...")
+    for project_id in project_ids:
+        try:
             sub_changes = await fetch_code_changes(client, project_id)
-            all_code_changes.extend(sub_changes)
-        return all_code_changes
-    except Exception as e:
-        logging.error(f"Error acquiring code changes: {e}")
-        return []
+            batch.extend(sub_changes)
+            if len(batch) >= BATCH_SIZE:
+                await process_and_insert_data({"fact_code_changes_records": batch})
+                batch = []
+        except Exception as e:
+            logging.error(f"Error acquiring code changes for project {project_id}: {e}")
+    if batch:
+        await process_and_insert_data({"fact_code_changes_records": batch})
 
-async def acquire_mr_records(client: httpx.AsyncClient, project_ids: List[int]) -> List[Dict[str, Any]]:
-    all_mr_records = []
-    try:
-        logging.info("Fetching MR records...")
-        for project_id in project_ids:
+async def acquire_mr_records(client: httpx.AsyncClient, project_ids: List[int]) -> None:
+    batch = []
+    logging.info("Fetching MR records...")
+    for project_id in project_ids:
+        try:
             sub_mr_records = await fetch_mr_records(client, project_id)
-            all_mr_records.extend(sub_mr_records)
-        return all_mr_records
-    except Exception as e:
-        logging.error(f"Error acquiring MR records: {e}")
-        return []
+            batch.extend(sub_mr_records)
+            if len(batch) >= BATCH_SIZE:
+                await process_and_insert_data({"fact_audit_records_info": batch})
+                batch = []
+        except Exception as e:
+            logging.error(f"Error acquiring MR records for project {project_id}: {e}")
+    if batch:
+        await process_and_insert_data({"fact_audit_records_info": batch})
 
-async def acquire_cicd_pipeline_activities(client: httpx.AsyncClient, project_ids: List[int]) -> List[Dict[str, Any]]:
-    all_pipeline_records = []
-    try:
-        logging.info("Fetching cicd pipeline activities...")
-        for project_id in project_ids:
+async def acquire_cicd_pipeline_activities(client: httpx.AsyncClient, project_ids: List[int]) -> None:
+    batch = []
+    logging.info("Fetching cicd pipeline activities...")
+    for project_id in project_ids:
+        try:
             sub_pipeline_records = await fetch_cicd_pipelines(client, project_id)
-            all_pipeline_records.extend(sub_pipeline_records)
-        return all_pipeline_records
-    except Exception as e:
-        logging.error(f"Error acquiring CICD pipeline activities: {e}")
-        return []
+            batch.extend(sub_pipeline_records)
+            if len(batch) >= BATCH_SIZE:
+                await process_and_insert_data({"fact_cicd_pipeline_activities_records": batch})
+                batch = []
+        except Exception as e:
+            logging.error(f"Error acquiring CICD pipeline activities for project {project_id}: {e}")
+    if batch:
+        await process_and_insert_data({"fact_cicd_pipeline_activities_records": batch})
 
-async def acquire_cicd_config_changes(client: httpx.AsyncClient, project_ids: List[int]) -> List[Dict[str, Any]]:
-    all_changes = []
-    try:
-        logging.info("Fetching cicd config changes...")
-        for project_id in project_ids:
+async def acquire_cicd_config_changes(client: httpx.AsyncClient, project_ids: List[int]) -> None:
+    batch = []
+    logging.info("Fetching cicd config changes...")
+    for project_id in project_ids:
+        try:
             sub_changes = await track_cicd_config_changes(client, project_id)
-            all_changes.extend(sub_changes)
-        return all_changes
-    except Exception as e:
-        logging.error(f"Error acquiring CICD config changes: {e}")
-        return []
+            batch.extend(sub_changes)
+            if len(batch) >= BATCH_SIZE:
+                await process_and_insert_data({"fact_cicd_config_changes_records": batch})
+                batch = []
+        except Exception as e:
+            logging.error(f"Error acquiring CICD config changes for project {project_id}: {e}")
+    if batch:
+        await process_and_insert_data({"fact_cicd_config_changes_records": batch})
 
 async def acquire_audit_records(client: httpx.AsyncClient) -> Dict[str, List[Dict[str, Any]]]:
     try:
@@ -744,20 +772,20 @@ async def acquire_audit_records(client: httpx.AsyncClient) -> Dict[str, List[Dic
         logging.error(f"Error acquiring audit records: {e}")
         return {}
 
-async def acquire_system_config_changes(client: httpx.AsyncClient, project_ids: List[int]) -> List[Dict[str, Any]]:
-    try:
-        settings_changes = await fetch_application_settings_changes(client)
-        feature_flag_changes = []
-        for project_id in project_ids:
+async def acquire_system_config_changes(client: httpx.AsyncClient, project_ids: List[int]) -> None:
+    settings_changes = await fetch_application_settings_changes(client)
+    if settings_changes:
+        await process_and_insert_data({"fact_system_config_changes_records": settings_changes})
+    webhooks = await fetch_webhooks(client)
+    if webhooks:
+        await process_and_insert_data({"fact_system_config_changes_records": webhooks})
+    for project_id in project_ids:
+        try:
             sub_flag_changes = await fetch_feature_flag_changes(client, project_id)
-            feature_flag_changes.extend(sub_flag_changes)
-        webhooks = await fetch_webhooks(client)
-
-        all_changes = settings_changes + feature_flag_changes + webhooks
-        return all_changes
-    except Exception as e:
-        logging.error(f"Error acquiring system config changes: {e}")
-        return []
+            if sub_flag_changes:
+                await process_and_insert_data({"fact_system_config_changes_records": sub_flag_changes})
+        except Exception as e:
+            logging.error(f"Error acquiring feature flag changes for project {project_id}: {e}")
 
 # ----------------------- Step 3: Transform data -----------------------
 async def process_and_insert_data(records_dict: Dict[str, List[Dict[str, Any]]]) -> None:
@@ -817,12 +845,11 @@ async def main():
             logging.info("Fetching project IDs...")
             project_ids = await get_project_ids(client)
             logging.info(f"Total project IDs fetched: {len(project_ids)}")
-
             tasks = [
-                acquire_audit_records(client),
                 acquire_users(client),
                 acquire_projects(client),
                 acquire_groups(client),
+                acquire_audit_records(client),
                 acquire_code_changes(client, project_ids),
                 acquire_mr_records(client, project_ids),
                 acquire_cicd_pipeline_activities(client, project_ids),
@@ -830,23 +857,7 @@ async def main():
                 acquire_system_config_changes(client, project_ids)
             ]
             logging.info("Initiating concurrent data fetching tasks...")
-            results = await asyncio.gather(*tasks)
-
-            audit_records = results[0]
-            processed_results = {
-                "fact_user_operations_records": audit_records["fact_user_operations_records"],
-                "fact_project_group_changes_records": audit_records["fact_project_group_changes_records"],
-                "dim_users_info": results[1],
-                "dim_projects_info": results[2],
-                "dim_groups_info": results[3],
-                "fact_code_changes_records": results[4],
-                "fact_audit_records_info": results[5],
-                "fact_cicd_pipeline_activities_records": results[6],
-                "fact_cicd_config_changes_records": results[7],
-                "fact_system_config_changes_records": results[8]
-            }
-            logging.info("Starting data processing and insertion into Doris...")
-            await process_and_insert_data(processed_results)
+            await asyncio.gather(*tasks)
             logging.info("Data processing and insertion completed successfully.")
         logging.info("Script execution finished gracefully.")
     except httpx.HTTPStatusError as http_error:
