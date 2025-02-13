@@ -752,7 +752,10 @@ async def acquire_cicd_pipeline_activities(client: httpx.AsyncClient, project_id
 
 async def acquire_cicd_config_changes(client: httpx.AsyncClient, project_ids: List[int]) -> None:
     batch = []
+<<<<<<< HEAD
     logging.info("Fetching cicd config changes...")
+=======
+>>>>>>> 73010202136e628b775669bddf9ad5364cafe5c0
     for project_id in project_ids:
         try:
             sub_changes = await track_cicd_config_changes(client, project_id)
@@ -846,10 +849,17 @@ async def main():
             project_ids = await get_project_ids(client)
             logging.info(f"Total project IDs fetched: {len(project_ids)}")
             tasks = [
+<<<<<<< HEAD
                 acquire_users(client),
                 acquire_projects(client),
                 acquire_groups(client),
                 acquire_audit_records(client),
+=======
+                fetch_audit_records(client),
+                fetch_users(client),
+                acquire_projects(client),
+                fetch_groups(client),
+>>>>>>> 73010202136e628b775669bddf9ad5364cafe5c0
                 acquire_code_changes(client, project_ids),
                 acquire_mr_records(client, project_ids),
                 acquire_cicd_pipeline_activities(client, project_ids),
